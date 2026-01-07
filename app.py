@@ -6,7 +6,6 @@ from symbol_manager import SymbolManager
 from trading_engine import TradingEngine
 
 app = Flask(__name__)
-# SECURITY NOTE: Change this key in production
 app.secret_key = 'algo_secure_key_prod'
 
 cfg = ConfigManager()
@@ -93,7 +92,7 @@ def search():
 def get_ltp():
     """Fetch Live Price with Segment Support"""
     sec_id = request.args.get('id')
-    segment = request.args.get('segment') # <--- NEW PARAM
+    segment = request.args.get('segment') # <--- CRITICAL: Get Segment
     
     if not sec_id: return jsonify({"ltp": 0.0})
     
@@ -128,7 +127,7 @@ def get_options():
 def get_option_ltp():
     sec_id = request.args.get('id')
     if not sec_id: return jsonify({"ltp": 0.0})
-    # Options are always NSE_FNO (usually)
+    # Options are always NSE_FNO
     price = engine.get_latest_price(sec_id, 'NSE_FNO')
     return jsonify({"ltp": price})
 
