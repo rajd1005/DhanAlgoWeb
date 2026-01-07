@@ -1,204 +1,153 @@
-import threading
-import time
-import json
+import pandas as pd
+import requests
 import os
+import threading
+import gc
 from datetime import datetime
-import pytz
-from dhanhq import DhanContext, dhanhq
 
-class TradingEngine:
-    def __init__(self, config, notifier, symbol_manager, filename="data/trades.json"):
-        self.cfg = config
-        self.notify = notifier
-        self.sym_mgr = symbol_manager
+class SymbolManager:
+    def __init__(self, filename="data/instruments.csv"):
         self.filename = filename
+        self.url = "https://images.dhan.co/api-data/api-scrip-master.csv"
+        self.df = None
+        self.is_ready = False 
         
-        self.active_trades = self.load_trades()
-        self.dhan = None
-        self.is_connected = False
+        folder = os.path.dirname(filename)
+        if folder and not os.path.exists(folder):
+            os.makedirs(folder)
         
-        # Start Background Thread
-        self.stop_event = threading.Event()
-        self.monitor_thread = threading.Thread(target=self.run_loop)
-        self.monitor_thread.daemon = True
-        self.monitor_thread.start()
-        
-        self.connect_api()
+        self.loader_thread = threading.Thread(target=self._background_init)
+        self.loader_thread.daemon = True
+        self.loader_thread.start()
 
-    def connect_api(self):
-        c = self.cfg.config['dhan_creds']
-        if c['client_id'] and c['access_token']:
-            try:
-                # DhanHQ v2.0 requires Context
-                context = DhanContext(c['client_id'], c['access_token'])
-                self.dhan = dhanhq(context)
-                self.is_connected = True
-                print("✅ API Connected Successfully")
-                return True
-            except Exception as e:
-                print(f"❌ API Connection Failed: {e}")
-                self.is_connected = False
-        return False
+    def _background_init(self):
+        print("⏳ Symbol Manager: Initializing in background...")
+        if not os.path.exists(self.filename):
+            print("⬇️ Downloading Scrip Master...")
+            if not self.download_scrips():
+                print("❌ Download Failed.")
+                return
+        self.load_instruments()
 
-    def load_trades(self):
+    def download_scrips(self):
+        try:
+            response = requests.get(self.url, timeout=60)
+            with open(self.filename, 'wb') as f:
+                f.write(response.content)
+            return True
+        except Exception as e:
+            print(f"❌ Error downloading CSV: {e}")
+            return False
+
+    def load_instruments(self):
         if os.path.exists(self.filename):
             try:
-                with open(self.filename, 'r') as f: return json.load(f)
-            except: return {}
-        return {}
+                # Load necessary columns
+                use_cols = [
+                    'SEM_EXM_EXCH_ID', 'SEM_SMST_SECURITY_ID', 
+                    'SEM_TRADING_SYMBOL', 'SEM_INSTRUMENT_NAME', 
+                    'SEM_EXPIRY_DATE', 'SEM_STRIKE_PRICE', 'SEM_OPTION_TYPE',
+                    'SEM_CUSTOM_SYMBOL' # Description (Fixes "Nifty 50" Search)
+                ]
+                dtype_map = {
+                    'SEM_SMST_SECURITY_ID': 'str',
+                    'SEM_TRADING_SYMBOL': 'str',
+                    'SEM_CUSTOM_SYMBOL': 'str',
+                    'SEM_INSTRUMENT_NAME': 'category',
+                    'SEM_EXM_EXCH_ID': 'category',
+                    'SEM_OPTION_TYPE': 'category',
+                    'SEM_STRIKE_PRICE': 'float32'
+                }
 
-    def save_trades(self):
-        with open(self.filename, 'w') as f: json.dump(self.active_trades, f, indent=4)
+                self.df = pd.read_csv(self.filename, usecols=use_cols, dtype=dtype_map, low_memory=False)
+                
+                # Filter Valid Data
+                self.df = self.df[self.df['SEM_EXM_EXCH_ID'].isin(['NSE', 'BSE', 'MCX'])]
+                valid_instruments = ['EQUITY', 'INDEX', 'FUTIDX', 'FUTSTK', 'FUTCOM', 'OPTIDX', 'OPTSTK', 'OPTCOM']
+                self.df = self.df[self.df['SEM_INSTRUMENT_NAME'].isin(valid_instruments)]
 
-    # --- PRICE FETCHER (CRITICAL FIX) ---
-    def get_latest_price(self, security_id, exchange_segment=None):
-        """
-        Fetches Live Price using 'ticker_data'.
-        Ensures Security ID is passed as INTEGER.
-        """
-        if not self.is_connected: return 0.0
-        
-        # 1. Determine Segment (Default to NSE_EQ if missing)
-        segment = exchange_segment if exchange_segment else self.dhan.NSE
+                # Setup Search Keys
+                self.df['SEARCH_KEY'] = self.df['SEM_TRADING_SYMBOL'].str.upper()
+                self.df['DESC_KEY'] = self.df['SEM_CUSTOM_SYMBOL'].str.upper().fillna("") # Search description
+                self.df['DISPLAY'] = self.df['SEM_TRADING_SYMBOL'] + " (" + self.df['SEM_INSTRUMENT_NAME'].astype(str) + ")"
+                self.df['EXPIRY_DT'] = pd.to_datetime(self.df['SEM_EXPIRY_DATE'], errors='coerce')
+
+                # API Segment Mapping
+                def get_segment(row):
+                    exch = row['SEM_EXM_EXCH_ID']
+                    instr = row['SEM_INSTRUMENT_NAME']
+                    if instr == 'INDEX': return 'IDX_I'
+                    if exch == 'MCX': return 'MCX_COMM'
+                    if exch == 'NSE': return 'NSE_EQ' if instr == 'EQUITY' else 'NSE_FNO'
+                    if exch == 'BSE': return 'BSE_EQ' if instr == 'EQUITY' else 'BSE_FNO'
+                    return 'NSE_EQ'
+
+                self.df['API_SEGMENT'] = self.df.apply(get_segment, axis=1)
+
+                self.is_ready = True
+                print(f"✅ Symbol Manager Ready: {len(self.df)} instruments loaded.")
+                gc.collect()
+
+            except Exception as e:
+                print(f"⚠️ Error loading CSV: {e}")
+
+    def search(self, query):
+        if not self.is_ready or self.df is None: return []
         
         try:
-            # FIX: Convert ID to Integer (API Requirement)
-            try:
-                sec_id_int = int(security_id)
-            except:
-                sec_id_int = security_id # Fallback if alphanumeric
+            query = query.upper().strip()
             
-            # 2. Call Ticker Data API
-            req = {segment: [sec_id_int]}
-            response = self.dhan.ticker_data(req)
+            # 1. Match Symbol OR Description
+            mask_sym = self.df['SEARCH_KEY'].str.contains(query, na=False)
+            mask_desc = self.df['DESC_KEY'].str.contains(query, na=False)
+            mask_query = mask_sym | mask_desc
             
-            if response.get('status') == 'success':
-                data = response.get('data', {})
-                # Handle response structure
-                items = data.get(segment, [])
-                for item in items:
-                    return float(item.get('last_price', 0.0))
-                    
+            # 2. Restrict Search Box to relevant types
+            allowed_types = ['INDEX', 'EQUITY', 'FUTIDX', 'FUTSTK', 'FUTCOM']
+            mask_type = self.df['SEM_INSTRUMENT_NAME'].isin(allowed_types)
+            
+            results = self.df[mask_query & mask_type].copy()
+            
+            # 3. Sort: Index First, then Shortest Name
+            results['is_index'] = results['SEM_INSTRUMENT_NAME'] == 'INDEX'
+            results['len'] = results['SEM_TRADING_SYMBOL'].str.len()
+            
+            results = results.sort_values(
+                by=['is_index', 'len', 'SEM_TRADING_SYMBOL'], 
+                ascending=[False, True, True]
+            ).head(20)
+            
+            output = []
+            for _, row in results.iterrows():
+                output.append({
+                    "symbol": row['SEM_TRADING_SYMBOL'],
+                    "id": row['SEM_SMST_SECURITY_ID'],
+                    "exchange": row['SEM_EXM_EXCH_ID'],
+                    "display": row['DISPLAY'],
+                    "segment": row['API_SEGMENT'],
+                    "type": row['SEM_INSTRUMENT_NAME']
+                })
+            return output
         except Exception as e:
-            # print(f"LTP Fetch Error: {e}") 
-            pass
-            
-        return 0.0
+            return []
 
-    def get_option_chain_data(self, symbol, spot_price):
-        # Step size logic
-        step = 100 if "BANK" in symbol.upper() else 50
-        atm_strike = round(spot_price / step) * step
-        strikes = []
-        for i in range(-5, 6):
-            strikes.append(atm_strike + (i * step))
-        return strikes, atm_strike
+    def get_atm_security(self, index_symbol, spot_price, direction):
+        if not self.is_ready or self.df is None: return None, None
+        try:
+            step = 100 if "BANK" in index_symbol.upper() else 50
+            strike = round(spot_price / step) * step
+            opt_type = "CE" if direction == "BUY" else "PE"
 
-    def calculate_targets(self, entry, sl_points, direction):
-        targets = {}
-        factor = 1 if direction == "BUY" else -1
-        multipliers = [0.5, 1.0, 1.5, 2.0, 3.0]
-        sl_price = entry - (sl_points * factor)
-        for i, m in enumerate(multipliers):
-            targets[f"T{i+1}"] = entry + (sl_points * m * factor)
-        return sl_price, targets
-
-    def place_trade(self, symbol, security_id, direction, qty, channel, sl_points, mode="PAPER"):
-        target_channel, forced = self.cfg.get_target_channel(channel)
-        
-        # Get Entry Price
-        entry_price = self.get_latest_price(security_id, 'NSE_FNO')
-        if entry_price == 0: 
-            entry_price = self.get_latest_price(security_id, 'NSE_EQ')
-        if entry_price == 0: entry_price = 100.0
-            
-        if mode == "LIVE" and self.is_connected:
-            try:
-                self.dhan.place_order(
-                    security_id=str(security_id),
-                    exchange_segment=self.dhan.NSE_FNO,
-                    transaction_type=self.dhan.BUY if direction == "BUY" else self.dhan.SELL,
-                    quantity=qty,
-                    order_type=self.dhan.MARKET,
-                    product_type=self.dhan.INTRA,
-                    price=0
-                )
-            except Exception as e:
-                return f"API Error: {e}"
-
-        sl_price, targets = self.calculate_targets(entry_price, sl_points, direction)
-        
-        trade_id = f"{symbol}_{int(time.time())}"
-        self.active_trades[trade_id] = {
-            "id": trade_id, "symbol": symbol, "sec_id": security_id,
-            "direction": direction, "qty": qty, "entry_price": entry_price,
-            "sl_price": sl_price, "targets": targets, "channel": target_channel,
-            "mode": mode, "max_price": entry_price, "t1_hit": False, "status": "ACTIVE"
-        }
-        self.save_trades()
-        self.cfg.increment_trade_count(target_channel)
-
-        self.notify.notify_add(target_channel, symbol, direction, mode)
-        self.notify.notify_active(target_channel, self.active_trades[trade_id])
-        return "Trade Executed Successfully"
-
-    def convert_to_live(self, trade_id):
-        t = self.active_trades.get(trade_id)
-        if t and t['mode'] == "PAPER":
-            res = self.place_trade(t['symbol'], t['sec_id'], t['direction'], t['qty'], "VIP Channel", 20, "LIVE")
-            t['status'] = "CONVERTED_TO_LIVE"
-            self.save_trades()
-            return f"Converted: {res}"
-        return "Invalid Trade"
-
-    def run_loop(self):
-        while not self.stop_event.is_set():
-            # Time Strategy (09:54)
-            now = datetime.now(pytz.timezone('Asia/Kolkata'))
-            if now.strftime("%H:%M:%S") == "09:54:00" and self.is_connected:
-                try:
-                    # Fetch Nifty Spot (Index Segment)
-                    spot = self.get_latest_price("13", "IDX_I")
-                    if spot > 0:
-                        sec_id, sym = self.sym_mgr.get_atm_security("NIFTY", spot, "BUY")
-                        if sec_id:
-                            self.place_trade(sym, sec_id, "BUY", 50, "VIP Channel", 20, "PAPER")
-                            time.sleep(1.5)
-                except: pass
-
-            # Monitor Active Trades
-            for tid, t in list(self.active_trades.items()):
-                if t['status'] != "ACTIVE": continue
-
-                ltp = self.get_latest_price(t['sec_id'], 'NSE_FNO')
-                if ltp == 0: ltp = t['entry_price']
-
-                # Max High Tracking
-                if t['direction'] == "BUY":
-                    if ltp > t['max_price']: t['max_price'] = ltp
-                else:
-                    if ltp < t['max_price']: t['max_price'] = ltp
-
-                # Target 1 Logic
-                t1 = t['targets']['T1']
-                if not t['t1_hit']:
-                    if (t['direction'] == "BUY" and ltp >= t1) or (t['direction'] == "SELL" and ltp <= t1):
-                        t['t1_hit'] = True
-                        t['sl_price'] = t['entry_price']
-                        self.notify.notify_update(t['channel'], t['symbol'], "Target 1 Hit! SL Moved to Cost.")
-
-                # Exit Logic
-                reason = None
-                if t['direction'] == "BUY":
-                    if ltp <= t['sl_price']: reason = "SL Hit"
-                    elif ltp >= t['targets']['T5']: reason = "Target 5 Hit"
-                else:
-                    if ltp >= t['sl_price']: reason = "SL Hit"
-                    elif ltp <= t['targets']['T5']: reason = "Target 5 Hit"
-                
-                if reason:
-                    self.notify.notify_exit(t['channel'], t, reason, ltp)
-                    del self.active_trades[tid]
-                    self.save_trades()
-
-            time.sleep(1)
+            mask = (
+                (self.df['SEM_INSTRUMENT_NAME'].isin(['OPTIDX', 'OPTSTK'])) &
+                (self.df['SEARCH_KEY'].str.contains(index_symbol.upper())) &
+                (self.df['SEM_STRIKE_PRICE'] == strike) &
+                (self.df['SEM_OPTION_TYPE'] == opt_type) &
+                (self.df['EXPIRY_DT'] >= datetime.now())
+            )
+            matches = self.df[mask].sort_values('EXPIRY_DT')
+            if not matches.empty:
+                row = matches.iloc[0]
+                return str(row['SEM_SMST_SECURITY_ID']), row['DISPLAY']
+        except: pass
+        return None, None
