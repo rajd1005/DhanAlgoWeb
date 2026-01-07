@@ -27,12 +27,16 @@ class TradingEngine:
         self.connect_api()
 
     def connect_api(self):
-        """Connects to Dhan API using DhanContext."""
+        """
+        Connects to Dhan API using DhanContext.
+        Fixes 'API Connection Failed' by using the correct v2 initialization.
+        """
         c = self.cfg.config['dhan_creds']
         if c['client_id'] and c['access_token']:
             try:
-                # Create Context (Required for v2.0)
+                # [FIX 1] Create DhanContext first
                 context = DhanContext(c['client_id'], c['access_token'])
+                # [FIX 2] Pass context to dhanhq
                 self.dhan = dhanhq(context)
                 
                 self.is_connected = True
@@ -57,33 +61,46 @@ class TradingEngine:
     
     def get_latest_price(self, security_id, exchange_segment=None):
         """
-        Fetches Live LTP. Automatically tries Index/Equity segments if unknown.
+        Fetches Live LTP using 'ticker_data'.
+        Automatically tries Index/Equity segments if unknown.
         """
         if not self.is_connected: return 0.0
         
-        # 1. Helper to try a specific segment
+        # Helper to fetch price using correct API method
         def fetch(segment):
             try:
-                q = self.dhan.get_quote(segment, security_id)
-                if q and 'data' in q and 'last_price' in q['data']:
-                    return float(q['data']['last_price'])
-            except: pass
+                # [FIX 3] Use 'ticker_data' instead of 'get_quote'
+                # API expects: { "NSE_EQ": [1333] }
+                req = {segment: [str(security_id)]}
+                response = self.dhan.ticker_data(req)
+                
+                if response.get('status') == 'success':
+                    # Parse response to find the price
+                    data = response.get('data', {})
+                    # Data might be nested by segment or flat
+                    items = data.get(segment, []) if isinstance(data, dict) else []
+                    
+                    for item in items:
+                        # API returns 'last_price' or 'ltp'
+                        return float(item.get('last_price', 0.0))
+            except Exception as e:
+                pass
             return 0.0
 
-        # 2. If segment provided, use it
+        # 1. If segment provided, use it
         if exchange_segment:
             return fetch(exchange_segment)
 
-        # 3. If no segment (e.g. from Search), try standard Equity first
-        price = fetch(self.dhan.NSE) # NSE_EQ
+        # 2. If no segment, try standard Equity (NSE_EQ)
+        price = fetch(self.dhan.NSE) 
         if price > 0: return price
         
-        # 4. If 0, try INDEX (Fix for NIFTY/BANKNIFTY)
-        price = fetch(self.dhan.INDEX) # IDX_I
+        # 3. If 0, try INDEX (IDX_I) - Essential for Nifty/BankNifty
+        price = fetch(self.dhan.INDEX)
         if price > 0: return price
         
-        # 5. Try MCX (Commodity)
-        price = fetch(self.dhan.MCX)
+        # 4. Try FNO (NSE_FNO)
+        price = fetch(self.dhan.NSE_FNO)
         
         return price
 
@@ -111,14 +128,13 @@ class TradingEngine:
         # Smart Fetch for Entry Price
         entry_price = self.get_latest_price(security_id, self.dhan.NSE_FNO)
         if entry_price == 0: 
-            # Try Equity/Index if FNO failed (fallback logic)
-            entry_price = self.get_latest_price(security_id)
+            entry_price = self.get_latest_price(security_id) # Fallback to Equity/Index
         if entry_price == 0: entry_price = 100.0 # Final Fallback
             
         if mode == "LIVE" and self.is_connected:
             try:
                 self.dhan.place_order(
-                    security_id=security_id,
+                    security_id=str(security_id),
                     exchange_segment=self.dhan.NSE_FNO,
                     transaction_type=self.dhan.BUY if direction == "BUY" else self.dhan.SELL,
                     quantity=qty,
@@ -161,7 +177,7 @@ class TradingEngine:
             if now.strftime("%H:%M:%S") == "09:54:00":
                 if self.is_connected:
                     try:
-                        # Smart fetch for Nifty Spot
+                        # Smart fetch for Nifty Spot (Index Segment)
                         spot = self.get_latest_price("13", self.dhan.INDEX)
                         if spot > 0:
                             sec_id, sym = self.sym_mgr.get_atm_security("NIFTY", spot, "BUY")
@@ -183,7 +199,7 @@ class TradingEngine:
                 else:
                     if ltp < t['max_price']: t['max_price'] = ltp
 
-                # Target 1
+                # Target 1 (Move SL to Cost)
                 t1 = t['targets']['T1']
                 if not t['t1_hit']:
                     if (t['direction'] == "BUY" and ltp >= t1) or (t['direction'] == "SELL" and ltp <= t1):
