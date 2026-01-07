@@ -18,6 +18,7 @@ class TradingEngine:
         self.dhan = None
         self.is_connected = False
         
+        # Start Background Thread
         self.stop_event = threading.Event()
         self.monitor_thread = threading.Thread(target=self.run_loop)
         self.monitor_thread.daemon = True
@@ -26,13 +27,23 @@ class TradingEngine:
         self.connect_api()
 
     def connect_api(self):
+        """
+        Connects to Dhan API using DhanContext (Required for v2.0+).
+        """
         c = self.cfg.config['dhan_creds']
         if c['client_id'] and c['access_token']:
             try:
-                self.dhan = dhanhq(c['client_id'], c['access_token'])
+                # --- FIX START ---
+                # We must create a Context object first!
+                context = DhanContext(c['client_id'], c['access_token'])
+                self.dhan = dhanhq(context)
+                # --- FIX END ---
+                
                 self.is_connected = True
+                print("✅ API Connected Successfully")
                 return True
-            except:
+            except Exception as e:
+                print(f"❌ API Connection Failed: {e}")
                 self.is_connected = False
         return False
 
@@ -46,44 +57,25 @@ class TradingEngine:
     def save_trades(self):
         with open(self.filename, 'w') as f: json.dump(self.active_trades, f, indent=4)
 
-    # --- NEW HELPERS FOR FRONTEND ---
+    # --- HELPERS ---
     
     def get_latest_price(self, security_id, exchange_segment=None):
-        """Fetches Live LTP from Dhan."""
         if not self.is_connected: return 0.0
-        
-        # Default to NSE Equity if not specified
         if not exchange_segment: exchange_segment = self.dhan.NSE
-            
         try:
-            # Exchange Segment mapping: NSE=1, FNO=2, etc. (Check Dhan Docs)
-            # Using basic try-fetch
             quote = self.dhan.get_quote(exchange_segment, security_id)
             if quote and 'data' in quote:
                 return float(quote['data']['last_price'])
-        except Exception as e:
-            print(f"LTP Fetch Error: {e}")
+        except: pass
         return 0.0
 
     def get_option_chain_data(self, symbol, spot_price):
-        """
-        Generates a small Option Chain (ATM +/- 5 strikes) for the dropdown.
-        """
-        # 1. Determine Step Size (NIFTY=50, BANKNIFTY=100, Others=Variable)
         step = 100 if "BANK" in symbol.upper() else 50
-        
-        # 2. Calculate ATM Strike
         atm_strike = round(spot_price / step) * step
-        
-        # 3. Generate Strike List (5 below, ATM, 5 above)
         strikes = []
         for i in range(-5, 6):
-            s = atm_strike + (i * step)
-            strikes.append(s)
-            
+            strikes.append(atm_strike + (i * step))
         return strikes, atm_strike
-
-    # --- EXISTING LOGIC ---
 
     def calculate_targets(self, entry, sl_points, direction):
         targets = {}
@@ -97,9 +89,8 @@ class TradingEngine:
     def place_trade(self, symbol, security_id, direction, qty, channel, sl_points, mode="PAPER"):
         target_channel, forced = self.cfg.get_target_channel(channel)
         
-        # Fetch Real Entry Price if possible
         entry_price = self.get_latest_price(security_id, self.dhan.NSE_FNO)
-        if entry_price == 0: entry_price = 100.0 # Fallback
+        if entry_price == 0: entry_price = 100.0
             
         if mode == "LIVE" and self.is_connected:
             try:
@@ -142,14 +133,25 @@ class TradingEngine:
 
     def run_loop(self):
         while not self.stop_event.is_set():
-            # (Time Strategy Logic - kept concise for brevity)
-            # ...
-            # (Risk Manager Logic)
+            # Time Strategy (09:54)
+            now = datetime.now(pytz.timezone('Asia/Kolkata'))
+            if now.strftime("%H:%M:%S") == "09:54:00":
+                if self.is_connected:
+                    try:
+                        q = self.dhan.get_quote(self.dhan.NSE, "13") 
+                        spot = float(q['data']['last_price'])
+                        sec_id, sym = self.sym_mgr.get_atm_security("NIFTY", spot, "BUY")
+                        if sec_id:
+                            self.place_trade(sym, sec_id, "BUY", 50, "VIP Channel", 20, "PAPER")
+                            time.sleep(1.5)
+                    except: pass
+
+            # Monitor Trades
             for tid, t in list(self.active_trades.items()):
                 if t['status'] != "ACTIVE": continue
 
                 ltp = self.get_latest_price(t['sec_id'], self.dhan.NSE_FNO)
-                if ltp == 0: ltp = t['entry_price'] # Mock if fetch fails
+                if ltp == 0: ltp = t['entry_price']
 
                 # Max High
                 if t['direction'] == "BUY":
