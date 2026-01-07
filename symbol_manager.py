@@ -42,12 +42,12 @@ class SymbolManager:
     def load_instruments(self):
         if os.path.exists(self.filename):
             try:
-                # Load necessary columns
+                # 1. Load Columns
                 use_cols = [
                     'SEM_EXM_EXCH_ID', 'SEM_SMST_SECURITY_ID', 
                     'SEM_TRADING_SYMBOL', 'SEM_INSTRUMENT_NAME', 
                     'SEM_EXPIRY_DATE', 'SEM_STRIKE_PRICE', 'SEM_OPTION_TYPE',
-                    'SEM_CUSTOM_SYMBOL' # Description (Fixes "Nifty 50" Search)
+                    'SEM_CUSTOM_SYMBOL'
                 ]
                 dtype_map = {
                     'SEM_SMST_SECURITY_ID': 'str',
@@ -61,18 +61,22 @@ class SymbolManager:
 
                 self.df = pd.read_csv(self.filename, usecols=use_cols, dtype=dtype_map, low_memory=False)
                 
-                # Filter Valid Data
+                # 2. Filter
                 self.df = self.df[self.df['SEM_EXM_EXCH_ID'].isin(['NSE', 'BSE', 'MCX'])]
-                valid_instruments = ['EQUITY', 'INDEX', 'FUTIDX', 'FUTSTK', 'FUTCOM', 'OPTIDX', 'OPTSTK', 'OPTCOM']
+                valid_instruments = [
+                    'EQUITY', 'INDEX', 
+                    'FUTIDX', 'FUTSTK', 'FUTCOM', 
+                    'OPTIDX', 'OPTSTK', 'OPTCOM'
+                ]
                 self.df = self.df[self.df['SEM_INSTRUMENT_NAME'].isin(valid_instruments)]
 
-                # Setup Search Keys
+                # 3. Search Helpers
                 self.df['SEARCH_KEY'] = self.df['SEM_TRADING_SYMBOL'].str.upper()
-                self.df['DESC_KEY'] = self.df['SEM_CUSTOM_SYMBOL'].str.upper().fillna("") # Search description
+                self.df['DESC_KEY'] = self.df['SEM_CUSTOM_SYMBOL'].str.upper().fillna("")
                 self.df['DISPLAY'] = self.df['SEM_TRADING_SYMBOL'] + " (" + self.df['SEM_INSTRUMENT_NAME'].astype(str) + ")"
                 self.df['EXPIRY_DT'] = pd.to_datetime(self.df['SEM_EXPIRY_DATE'], errors='coerce')
 
-                # API Segment Mapping
+                # 4. Segment Mapping (CRITICAL)
                 def get_segment(row):
                     exch = row['SEM_EXM_EXCH_ID']
                     instr = row['SEM_INSTRUMENT_NAME']
@@ -93,22 +97,18 @@ class SymbolManager:
 
     def search(self, query):
         if not self.is_ready or self.df is None: return []
-        
         try:
             query = query.upper().strip()
+            # Match Symbol OR Description
+            mask_query = self.df['SEARCH_KEY'].str.contains(query, na=False) | \
+                         self.df['DESC_KEY'].str.contains(query, na=False)
             
-            # 1. Match Symbol OR Description
-            mask_sym = self.df['SEARCH_KEY'].str.contains(query, na=False)
-            mask_desc = self.df['DESC_KEY'].str.contains(query, na=False)
-            mask_query = mask_sym | mask_desc
-            
-            # 2. Restrict Search Box to relevant types
-            allowed_types = ['INDEX', 'EQUITY', 'FUTIDX', 'FUTSTK', 'FUTCOM']
-            mask_type = self.df['SEM_INSTRUMENT_NAME'].isin(allowed_types)
+            # Filter Types (Equity & Index)
+            mask_type = self.df['SEM_INSTRUMENT_NAME'].isin(['EQUITY', 'INDEX'])
             
             results = self.df[mask_query & mask_type].copy()
             
-            # 3. Sort: Index First, then Shortest Name
+            # Sort
             results['is_index'] = results['SEM_INSTRUMENT_NAME'] == 'INDEX'
             results['len'] = results['SEM_TRADING_SYMBOL'].str.len()
             
@@ -124,7 +124,7 @@ class SymbolManager:
                     "id": row['SEM_SMST_SECURITY_ID'],
                     "exchange": row['SEM_EXM_EXCH_ID'],
                     "display": row['DISPLAY'],
-                    "segment": row['API_SEGMENT'],
+                    "segment": row['API_SEGMENT'], # Sends correct segment
                     "type": row['SEM_INSTRUMENT_NAME']
                 })
             return output
