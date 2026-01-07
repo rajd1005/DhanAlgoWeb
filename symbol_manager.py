@@ -58,10 +58,10 @@ class SymbolManager:
 
                 self.df = pd.read_csv(self.filename, usecols=use_cols, dtype=dtype_map, low_memory=False)
                 
-                valid_exchanges = ['NSE', 'BSE', 'MCX']
-                self.df = self.df[self.df['SEM_EXM_EXCH_ID'].isin(valid_exchanges)]
+                # Filter for NSE, BSE, MCX
+                self.df = self.df[self.df['SEM_EXM_EXCH_ID'].isin(['NSE', 'BSE', 'MCX'])]
                 
-                # Load ALL instruments for backend calculation, but Search will filter later
+                # Keep Types: Equity, Index, Futures, Options
                 valid_instruments = [
                     'EQUITY', 'INDEX', 
                     'FUTIDX', 'FUTSTK', 'FUTCOM', 
@@ -69,9 +69,33 @@ class SymbolManager:
                 ]
                 self.df = self.df[self.df['SEM_INSTRUMENT_NAME'].isin(valid_instruments)]
 
+                # SEARCH OPTIMIZATION
                 self.df['SEARCH_KEY'] = self.df['SEM_TRADING_SYMBOL'].str.upper()
                 self.df['DISPLAY'] = self.df['SEM_TRADING_SYMBOL'] + " (" + self.df['SEM_INSTRUMENT_NAME'].astype(str) + ")"
                 self.df['EXPIRY_DT'] = pd.to_datetime(self.df['SEM_EXPIRY_DATE'], errors='coerce')
+
+                # MAP API SEGMENTS (Crucial for Price Fetching)
+                # Logic: 
+                # NSE + EQUITY -> NSE_EQ
+                # NSE + INDEX  -> IDX_I
+                # BSE + EQUITY -> BSE_EQ
+                # BSE + INDEX  -> IDX_I
+                # MCX -> MCX_COMM
+                def get_segment(row):
+                    exch = row['SEM_EXM_EXCH_ID']
+                    instr = row['SEM_INSTRUMENT_NAME']
+                    
+                    if instr == 'INDEX': return 'IDX_I'
+                    if exch == 'MCX': return 'MCX_COMM'
+                    if exch == 'NSE':
+                        if instr == 'EQUITY': return 'NSE_EQ'
+                        return 'NSE_FNO' # Futures/Options
+                    if exch == 'BSE':
+                        if instr == 'EQUITY': return 'BSE_EQ'
+                        return 'BSE_FNO'
+                    return 'NSE_EQ' # Default
+
+                self.df['API_SEGMENT'] = self.df.apply(get_segment, axis=1)
 
                 self.is_ready = True
                 print(f"✅ Symbol Manager Ready: {len(self.df)} instruments loaded.")
@@ -82,20 +106,18 @@ class SymbolManager:
 
     def search(self, query):
         """
-        Returns top 15 matches. 
-        STRICTLY RESTRICTED to EQUITY and INDEX segments only.
+        Returns top 15 matches with API_SEGMENT included.
+        Strictly Filters: EQUITY and INDEX only for the main search box.
         """
-        if not self.is_ready or self.df is None:
-            return []
+        if not self.is_ready or self.df is None: return []
         
         try:
             query = query.upper().strip()
             
-            # 1. Match Query
+            # 1. Match Name
             mask_query = self.df['SEARCH_KEY'].str.contains(query, na=False)
             
-            # 2. STRICT FILTER: Only show Stocks (EQUITY) or Indices (INDEX)
-            # We hide Futures & Options from the search box
+            # 2. STRICT FILTER: Only Stocks (EQUITY) or Indices (INDEX)
             mask_type = self.df['SEM_INSTRUMENT_NAME'].isin(['EQUITY', 'INDEX'])
             
             results = self.df[mask_query & mask_type].head(15)
@@ -107,16 +129,15 @@ class SymbolManager:
                     "id": row['SEM_SMST_SECURITY_ID'],
                     "exchange": row['SEM_EXM_EXCH_ID'],
                     "display": row['DISPLAY'],
+                    "segment": row['API_SEGMENT'], # <--- KEY FIX
                     "type": row['SEM_INSTRUMENT_NAME']
                 })
             return output
         except Exception as e:
-            print(f"Search Error: {e}")
             return []
 
     def get_atm_security(self, index_symbol, spot_price, direction):
         if not self.is_ready or self.df is None: return None, None
-        
         try:
             step = 100 if "BANK" in index_symbol.upper() else 50
             strike = round(spot_price / step) * step
@@ -129,13 +150,9 @@ class SymbolManager:
                 (self.df['SEM_OPTION_TYPE'] == opt_type) &
                 (self.df['EXPIRY_DT'] >= datetime.now())
             )
-            
             matches = self.df[mask].sort_values('EXPIRY_DT')
-            
             if not matches.empty:
                 row = matches.iloc[0]
                 return str(row['SEM_SMST_SECURITY_ID']), row['DISPLAY']
-        except Exception as e:
-            print(f"ATM Fetch Error: {e}")
-            
+        except: pass
         return None, None
