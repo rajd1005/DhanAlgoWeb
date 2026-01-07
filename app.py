@@ -1,136 +1,131 @@
-import os
-from flask import Flask, render_template, request, redirect, url_for, flash, jsonify
-from config_manager import ConfigManager
-from notifications import TelegramBot
-from symbol_manager import SymbolManager
-from trading_engine import TradingEngine
+import asyncio
+import json
+import struct
+import logging
+from fastapi import FastAPI, HTTPException, Query
+import uvicorn
+import websockets
 
-app = Flask(__name__)
-app.secret_key = 'algo_secure_key_prod'
+# --- CONFIGURATION ---
+CLIENT_ID = "YOUR_CLIENT_ID"       # REPLACE THIS
+ACCESS_TOKEN = "YOUR_ACCESS_TOKEN" # REPLACE THIS
 
-cfg = ConfigManager()
-bot = TelegramBot(cfg)
-sym_mgr = SymbolManager()
-engine = TradingEngine(cfg, bot, sym_mgr)
+# Instruments to Subscribe (Add more as needed)
+# 13 = Nifty 50, 25 = Nifty Bank
+WATCHLIST = [
+    {"ExchangeSegment": "IDX_I", "SecurityId": "13"},
+    {"ExchangeSegment": "IDX_I", "SecurityId": "25"}
+]
 
-@app.context_processor
-def inject_globals():
-    return dict(
-        channels=cfg.config['telegram']['channels'].keys(),
-        mode=cfg.config['trading_mode'],
-        system_ready=sym_mgr.is_ready
-    )
+# --- SHARED MEMORY ---
+# This dictionary stores real-time prices: { "13": 21500.50, "25": 48000.00 }
+live_market_data = {}
 
-@app.route('/')
-def index():
-    return render_template('index.html', trades=engine.active_trades)
+# --- LOGGING SETUP ---
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("DhanFeed")
 
-@app.route('/settings', methods=['GET', 'POST'])
-def settings():
-    if request.method == 'POST':
-        c = cfg.config
-        c['dhan_creds']['client_id'] = request.form.get('client_id')
-        c['dhan_creds']['access_token'] = request.form.get('access_token')
-        c['telegram']['bot_token'] = request.form.get('bot_token')
-        c['trading_mode'] = request.form.get('mode')
-        cfg.save_config()
-        if engine.connect_api(): flash("✅ Saved & Connected!")
-        else: flash("⚠️ Saved, but API Failed.")
-        return redirect(url_for('settings'))
-    return render_template('settings.html', config=cfg.config)
+# --- WEBSOCKET SERVICE ---
+class DhanWebSocketService:
+    def __init__(self):
+        self.url = f"wss://api-feed.dhan.co?version=2&token={ACCESS_TOKEN}&clientId={CLIENT_ID}&authType=2"
+        self.running = True
 
-@app.route('/trade', methods=['POST'])
-def trade():
-    sec_id = request.form.get('final_security_id')
-    symbol = request.form.get('final_symbol_name')
-    direction = request.form.get('direction')
-    chan = request.form.get('channel')
-    try:
-        qty = int(request.form.get('qty', 0))
-        sl = float(request.form.get('sl', 0))
-    except: qty=0; sl=0
+    async def connect_and_listen(self):
+        """Main loop that keeps the connection alive"""
+        while self.running:
+            try:
+                logger.info("⏳ Connecting to Dhan WebSocket...")
+                async with websockets.connect(self.url) as ws:
+                    logger.info("✅ Connected to DhanHQ!")
+                    
+                    # 1. Send Subscription Request
+                    req = {
+                        "RequestCode": 15,  # Ticker Data (LTP)
+                        "InstrumentCount": len(WATCHLIST),
+                        "InstrumentList": WATCHLIST
+                    }
+                    await ws.send(json.dumps(req))
+                    logger.info("📡 Subscription sent for Nifty & Bank Nifty")
 
-    current_mode = cfg.config['trading_mode']
-    if qty > 0 and sec_id:
-        msg = engine.place_trade(symbol, sec_id, direction, qty, chan, sl, current_mode)
-        flash(msg)
-    else:
-        flash("❌ Error: Invalid Selection")
-    return redirect(url_for('index'))
+                    # 2. Listen for Binary Data
+                    while self.running:
+                        response = await ws.recv()
+                        
+                        if isinstance(response, bytes):
+                            self.parse_binary(response)
+                        else:
+                            # Handle heartbeat/text messages
+                            pass
+                            
+            except Exception as e:
+                logger.error(f"❌ Connection Error: {e}. Reconnecting in 3s...")
+                await asyncio.sleep(3)
 
-@app.route('/convert/<tid>')
-def convert(tid):
-    msg = engine.convert_to_live(tid)
-    flash(msg)
-    return redirect(url_for('index'))
+    def parse_binary(self, data):
+        """Unpacks binary data and updates global dictionary"""
+        try:
+            # Header is 8 bytes
+            if len(data) < 8: return
 
-@app.route('/sync-scrips')
-def sync_scrips():
-    if sym_mgr.download_scrips(): flash("✅ Updated!")
-    else: flash("❌ Update Failed")
-    return redirect(url_for('settings'))
+            # Unpack Header: < (Little Endian), B (Code), H (Len), B (Seg), I (ID)
+            header = struct.unpack('<BHB I', data[:8])
+            packet_code = header[0]
+            security_id = str(header[3]) # Convert ID to string for dict key
 
-# --- API ROUTES ---
+            # Packet Code 2 = Ticker Packet (LTP)
+            if packet_code == 2:
+                # Payload starts at byte 8: < f (Float LTP), I (Int Time)
+                payload = struct.unpack('<f I', data[8:16])
+                ltp = round(payload[0], 2)
 
-@app.route('/api/status')
-def api_status():
-    return jsonify({
-        "connected": engine.is_connected,
-        "mode": cfg.config['trading_mode'],
-        "data_ready": sym_mgr.is_ready
-    })
+                # UPDATE SHARED MEMORY
+                live_market_data[security_id] = ltp
+                
+                # Optional: Debug Print (Uncomment to see stream)
+                # print(f"⚡ Update: {security_id} -> {ltp}")
+                
+        except Exception as e:
+            logger.error(f"Parse Error: {e}")
 
-@app.route('/api/search')
-def search():
-    if not sym_mgr.is_ready:
-        return jsonify([{"display": "⏳ Loading Data...", "symbol": "", "id": ""}])
-    q = request.args.get('q', '')
-    if len(q) < 2: return jsonify([])
-    return jsonify(sym_mgr.search(q))
+# --- WEB SERVER (FastAPI) ---
+app = FastAPI(title="DhanAlgoWeb Feed")
 
-@app.route('/api/ltp')
-def get_ltp():
-    """Fetch Live Price with Segment Support"""
-    sec_id = request.args.get('id')
-    segment = request.args.get('segment') # <--- CRITICAL: Get Segment
+@app.on_event("startup")
+async def startup_event():
+    """Start the WebSocket in the background when server starts"""
+    feed = DhanWebSocketService()
+    # Run in background without blocking the server
+    asyncio.create_task(feed.connect_and_listen())
+
+@app.get("/")
+async def root():
+    """Dashboard to see all data"""
+    return {
+        "status": "Live",
+        "data": live_market_data
+    }
+
+@app.get("/api/ltp")
+async def get_ltp(id: str = Query(...), segment: str = Query(None)):
+    """
+    Simulates the endpoint your old system was calling.
+    Example: /api/ltp?id=13&segment=IDX_I
+    """
+    price = live_market_data.get(id)
     
-    if not sec_id: return jsonify({"ltp": 0.0})
+    if price is None:
+        # If data hasn't arrived yet
+        return {"status": "waiting", "message": f"No data for ID {id} yet"}
     
-    # Pass segment explicitly to engine
-    price = engine.get_latest_price(sec_id, segment)
-    return jsonify({"ltp": price})
+    # Return formatted exactly like a standard API response
+    return {
+        "security_id": id,
+        "segment": segment,
+        "ltp": price
+    }
 
-@app.route('/api/options')
-def get_options():
-    symbol = request.args.get('symbol')
-    try: spot_price = float(request.args.get('spot', 0))
-    except: return jsonify([])
-    direction = request.args.get('direction', 'BUY')
-    
-    if not symbol or spot_price == 0: return jsonify([])
-    
-    strikes, atm = engine.get_option_chain_data(symbol, spot_price)
-    option_list = []
-    opt_type = "CE" if direction == "BUY" else "PE"
-    
-    for stk in strikes:
-        sec_id, name = sym_mgr.get_atm_security(symbol, stk, direction)
-        option_list.append({
-            "strike": stk,
-            "is_atm": (stk == atm),
-            "id": sec_id if sec_id else "",
-            "name": name if name else f"{symbol} {stk} {opt_type}"
-        })
-    return jsonify(option_list)
-
-@app.route('/api/option-ltp')
-def get_option_ltp():
-    sec_id = request.args.get('id')
-    if not sec_id: return jsonify({"ltp": 0.0})
-    # Options are always NSE_FNO
-    price = engine.get_latest_price(sec_id, 'NSE_FNO')
-    return jsonify({"ltp": price})
-
-if __name__ == '__main__':
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host='0.0.0.0', port=port)
+# --- RUNNER ---
+if __name__ == "__main__":
+    # Runs the server on port 8000
+    uvicorn.run(app, host="0.0.0.0", port=8000)
