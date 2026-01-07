@@ -1,33 +1,23 @@
 {% extends "base.html" %}
 {% block content %}
 <div class="card">
-    <div class="card-header">⚙️ System Configuration</div>
+    <div class="card-header">⚙️ Configuration</div>
     <div class="card-body">
         <form method="POST">
-            <h5>Dhan Credentials</h5>
-            <div class="row mb-3">
-                <div class="col">
-                    <input type="text" name="client_id" class="form-control" placeholder="Client ID" value="{{ config.dhan_creds.client_id }}">
-                </div>
-                <div class="col">
-                    <input type="password" name="access_token" class="form-control" placeholder="Access Token" value="{{ config.dhan_creds.access_token }}">
-                </div>
-            </div>
-
-            <h5>Telegram Settings</h5>
-            <div class="mb-3">
-                <input type="text" name="bot_token" class="form-control" placeholder="Bot Token" value="{{ config.telegram.bot_token }}">
-            </div>
+            <h5 class="mt-2">Dhan API</h5>
+            <input type="text" name="client_id" class="form-control mb-2" placeholder="Client ID" value="{{ config.dhan_creds.client_id }}">
+            <input type="password" name="access_token" class="form-control mb-3" placeholder="Access Token" value="{{ config.dhan_creds.access_token }}">
             
-            <h5>Trading Mode</h5>
-            <div class="mb-3">
-                <select name="mode" class="form-select">
-                    <option value="PAPER" {% if config.trading_mode == 'PAPER' %}selected{% endif %}>PAPER TRADING</option>
-                    <option value="LIVE" {% if config.trading_mode == 'LIVE' %}selected{% endif %}>LIVE TRADING</option>
-                </select>
-            </div>
-
-            <button type="submit" class="btn btn-primary">Save Settings</button>
+            <h5 class="mt-2">Telegram</h5>
+            <input type="text" name="bot_token" class="form-control mb-3" placeholder="Bot Token" value="{{ config.telegram.bot_token }}">
+            
+            <h5 class="mt-2">System</h5>
+            <select name="mode" class="form-select mb-3">
+                <option value="PAPER" {% if config.trading_mode=='PAPER' %}selected{% endif %}>PAPER TRADING</option>
+                <option value="LIVE" {% if config.trading_mode=='LIVE' %}selected{% endif %}>LIVE TRADING</option>
+            </select>
+            
+            <button class="btn btn-primary">Save Changes</button>
         </form>
     </div>
 </div>
