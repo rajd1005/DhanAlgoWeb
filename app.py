@@ -1,8 +1,10 @@
 import os
-from flask import Flask, render_template, request, redirect, url_for, flash
+from flask import Flask, render_template, request, redirect, url_for, flash, jsonify
 from config_manager import ConfigManager
 from notifications import TelegramBot
 from trading_engine import TradingEngine
+# Import the new Manager
+from symbol_manager import SymbolManager 
 
 app = Flask(__name__)
 app.secret_key = 'algo_secure_key'
@@ -10,6 +12,24 @@ app.secret_key = 'algo_secure_key'
 cfg = ConfigManager()
 bot = TelegramBot(cfg)
 engine = TradingEngine(cfg, bot)
+sym_manager = SymbolManager() # <--- Initialize
+
+# --- NEW ROUTE FOR SEARCH ---
+@app.route('/api/search')
+def search_symbol():
+    query = request.args.get('q', '')
+    if len(query) < 2: return jsonify([])
+    results = sym_manager.search(query)
+    return jsonify(results)
+
+@app.route('/sync-scrips')
+def sync_scrips():
+    """Manual Button to Update Scrip Master"""
+    if sym_manager.download_scrips():
+        flash("✅ Instruments Updated Successfully!")
+    else:
+        flash("❌ Update Failed.")
+    return redirect(url_for('settings'))
 
 @app.context_processor
 def inject_config():
