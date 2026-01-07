@@ -33,7 +33,7 @@ class SymbolManager:
 
     def download_scrips(self):
         try:
-            response = requests.get(self.url, timeout=30)
+            response = requests.get(self.url, timeout=60) # Increased timeout
             with open(self.filename, 'wb') as f:
                 f.write(response.content)
             return True
@@ -61,36 +61,38 @@ class SymbolManager:
 
                 self.df = pd.read_csv(self.filename, usecols=use_cols, dtype=dtype_map, low_memory=False)
                 
-                # 2. Filter Exchanges (NSE, BSE, MCX)
-                self.df = self.df[self.df['SEM_EXM_EXCH_ID'].isin(['NSE', 'BSE', 'MCX'])]
+                # 2. FILTER LOGIC (Improved)
+                # Keep NSE, BSE, MCX... AND allow Indices even if Exchange ID differs
+                valid_exchanges = ['NSE', 'BSE', 'MCX']
+                mask_exch = self.df['SEM_EXM_EXCH_ID'].isin(valid_exchanges)
                 
-                # 3. Filter Instruments (Equity, Index, Futures, Options)
+                # Keep Equity, Index, Futures, Options
                 valid_instruments = [
                     'EQUITY', 'INDEX', 
                     'FUTIDX', 'FUTSTK', 'FUTCOM', 
                     'OPTIDX', 'OPTSTK', 'OPTCOM'
                 ]
-                self.df = self.df[self.df['SEM_INSTRUMENT_NAME'].isin(valid_instruments)]
+                mask_instr = self.df['SEM_INSTRUMENT_NAME'].isin(valid_instruments)
+                
+                # Apply Filter
+                self.df = self.df[mask_exch & mask_instr]
 
-                # 4. Search & Display Helpers
+                # 3. Helpers
                 self.df['SEARCH_KEY'] = self.df['SEM_TRADING_SYMBOL'].str.upper()
-                
-                # Smart Display Name (e.g., "NIFTY (INDEX)", "RELIANCE (EQUITY)")
                 self.df['DISPLAY'] = self.df['SEM_TRADING_SYMBOL'] + " (" + self.df['SEM_INSTRUMENT_NAME'].astype(str) + ")"
-                
                 self.df['EXPIRY_DT'] = pd.to_datetime(self.df['SEM_EXPIRY_DATE'], errors='coerce')
 
-                # 5. Segment Mapping (Crucial for Price Fetching)
+                # 4. SEGMENT MAPPING (Crucial for Nifty Price)
                 def get_segment(row):
                     exch = row['SEM_EXM_EXCH_ID']
                     instr = row['SEM_INSTRUMENT_NAME']
                     
-                    if instr == 'INDEX': return 'IDX_I'     # Fixes Index Price
-                    if exch == 'MCX': return 'MCX_COMM'     # Fixes Commodity
+                    if instr == 'INDEX': return 'IDX_I'     # <--- Forces Indices to Correct Segment
+                    if exch == 'MCX': return 'MCX_COMM'
                     
                     if exch == 'NSE':
-                        if instr == 'EQUITY': return 'NSE_EQ' # Fixes Stock Price
-                        return 'NSE_FNO' # Futures & Options
+                        if instr == 'EQUITY': return 'NSE_EQ'
+                        return 'NSE_FNO' 
                         
                     if exch == 'BSE':
                         if instr == 'EQUITY': return 'BSE_EQ'
@@ -109,30 +111,37 @@ class SymbolManager:
 
     def search(self, query):
         """
-        Returns top 15 matches.
-        Includes: EQUITY, INDEX, and FUTURES.
-        Sorts by length to prioritize exact matches (e.g. 'NIFTY' before 'NIFTYBEES').
+        Returns top 20 matches.
+        PRIORITY SORTING: Indices -> Stocks -> Futures.
         """
         if not self.is_ready or self.df is None: return []
         
         try:
             query = query.upper().strip()
             
-            # 1. Filter by Name
+            # 1. Name Match
             mask_query = self.df['SEARCH_KEY'].str.contains(query, na=False)
             
-            # 2. Filter by Type (Show Stocks, Indices, and Futures)
-            # We explicitly exclude Options from the search box to keep it clean
-            allowed_types = ['EQUITY', 'INDEX', 'FUTIDX', 'FUTSTK', 'FUTCOM']
+            # 2. Filter Types (No Options in search box)
+            allowed_types = ['INDEX', 'EQUITY', 'FUTIDX', 'FUTSTK', 'FUTCOM']
             mask_type = self.df['SEM_INSTRUMENT_NAME'].isin(allowed_types)
             
-            # Apply Filters
             results = self.df[mask_query & mask_type].copy()
             
-            # 3. SMART SORT: Sort by length of symbol
-            # This ensures "NIFTY" (5 chars) comes before "NIFTYBEES" (9 chars)
+            # 3. SMART SORTING (The Fix for "Nifty 50 not get")
+            # Logic:
+            # - Priority 1: Is it an INDEX? (True/1 comes first)
+            # - Priority 2: Symbol Length (Shorter is better, e.g. "NIFTY" vs "NIFTYBEES")
+            # - Priority 3: Alphabetical
+            
+            results['is_index'] = results['SEM_INSTRUMENT_NAME'] == 'INDEX'
             results['len'] = results['SEM_TRADING_SYMBOL'].str.len()
-            results = results.sort_values(by=['len', 'SEM_TRADING_SYMBOL']).head(15)
+            
+            # Sort: Index=True (descending), Length (ascending), Name (ascending)
+            results = results.sort_values(
+                by=['is_index', 'len', 'SEM_TRADING_SYMBOL'], 
+                ascending=[False, True, True]
+            ).head(20)
             
             output = []
             for _, row in results.iterrows():
@@ -146,16 +155,17 @@ class SymbolManager:
                 })
             return output
         except Exception as e:
+            print(f"Search Error: {e}")
             return []
 
     def get_atm_security(self, index_symbol, spot_price, direction):
         if not self.is_ready or self.df is None: return None, None
         try:
+            # Step size logic
             step = 100 if "BANK" in index_symbol.upper() else 50
             strike = round(spot_price / step) * step
             opt_type = "CE" if direction == "BUY" else "PE"
 
-            # Filter for Options (OPTIDX, OPTSTK)
             mask = (
                 (self.df['SEM_INSTRUMENT_NAME'].isin(['OPTIDX', 'OPTSTK'])) &
                 (self.df['SEARCH_KEY'].str.contains(index_symbol.upper())) &
@@ -163,7 +173,9 @@ class SymbolManager:
                 (self.df['SEM_OPTION_TYPE'] == opt_type) &
                 (self.df['EXPIRY_DT'] >= datetime.now())
             )
+            
             matches = self.df[mask].sort_values('EXPIRY_DT')
+            
             if not matches.empty:
                 row = matches.iloc[0]
                 return str(row['SEM_SMST_SECURITY_ID']), row['DISPLAY']
