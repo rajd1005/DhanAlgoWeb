@@ -6,6 +6,7 @@ from symbol_manager import SymbolManager
 from trading_engine import TradingEngine
 
 app = Flask(__name__)
+# SECURITY NOTE: Change this key in production
 app.secret_key = 'algo_secure_key_prod'
 
 cfg = ConfigManager()
