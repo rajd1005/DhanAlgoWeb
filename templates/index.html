@@ -1,80 +1,69 @@
 {% extends "base.html" %}
 {% block content %}
-
 <div class="row">
-    <div class="col-md-4">
+    <div class="col-md-4 mb-3">
         <div class="card shadow-sm">
-            <div class="card-header bg-primary text-white">
-                ⚡ Quick Trade ({{ mode }})
-            </div>
+            <div class="card-header bg-primary text-white">⚡ Quick Trade ({{ mode }})</div>
             <div class="card-body">
                 <form action="/trade" method="POST">
-                    <div class="mb-3">
-                        <label>Symbol / ID</label>
-                        <input type="text" name="symbol" class="form-control" placeholder="e.g. 1333 or NIFTY" required>
+                    <div class="mb-2">
+                        <label>Symbol / Index</label>
+                        <input type="text" name="symbol" class="form-control" placeholder="NIFTY or 1333" required>
+                    </div>
+                    <div class="mb-2">
+                        <label>SL Points</label>
+                        <input type="number" name="sl" class="form-control" value="20" required>
+                    </div>
+                    <div class="row mb-2">
+                        <div class="col">
+                            <label>Qty</label>
+                            <input type="number" name="qty" class="form-control" value="25">
+                        </div>
+                        <div class="col">
+                            <label>Side</label>
+                            <select name="direction" class="form-select">
+                                <option value="BUY">BUY</option>
+                                <option value="SELL">SELL</option>
+                            </select>
+                        </div>
                     </div>
                     <div class="mb-3">
-                        <label>Direction</label>
-                        <select name="direction" class="form-select">
-                            <option value="BUY">BUY</option>
-                            <option value="SELL">SELL</option>
-                        </select>
-                    </div>
-                    <div class="mb-3">
-                        <label>Quantity</label>
-                        <input type="number" name="quantity" class="form-control" value="25">
-                    </div>
-                    <div class="mb-3">
-                        <label>Target Channel</label>
+                        <label>Notify Channel</label>
                         <select name="channel" class="form-select">
-                            <option value="Free Group">Free Group (Restricted)</option>
-                            <option value="VIP Channel">VIP Channel</option>
+                            {% for c in channels %}
+                            <option value="{{ c }}">{{ c }}</option>
+                            {% endfor %}
                         </select>
                     </div>
-                    <button type="submit" class="btn btn-success w-100">Execute Trade</button>
+                    <button class="btn btn-success w-100">Execute</button>
                 </form>
             </div>
         </div>
     </div>
-
     <div class="col-md-8">
         <div class="card shadow-sm">
-            <div class="card-header bg-dark text-white">
-                📋 Active Trades
-            </div>
-            <div class="card-body">
-                <table class="table table-hover">
+            <div class="card-header bg-dark text-white">📋 Active Positions</div>
+            <div class="table-responsive">
+                <table class="table table-hover mb-0">
                     <thead>
                         <tr>
-                            <th>Time</th>
                             <th>Symbol</th>
-                            <th>Side</th>
+                            <th>Entry</th>
+                            <th>High</th>
                             <th>Mode</th>
                             <th>Action</th>
                         </tr>
                     </thead>
                     <tbody>
-                        {% for id, trade in trades.items() %}
+                        {% for id, t in trades.items() %}
                         <tr>
-                            <td>{{ trade.entry_time }}</td>
-                            <td>{{ trade.symbol }}</td>
+                            <td>{{ t.symbol }}<br><small class="text-muted">{{ t.direction }}</small></td>
+                            <td>{{ t.entry_price }}</td>
+                            <td>{{ t.max_price }}</td>
+                            <td><span class="badge bg-{{ 'warning' if t.mode=='PAPER' else 'danger' }}">{{ t.mode }}</span></td>
                             <td>
-                                <span class="badge bg-{{ 'success' if trade.direction=='BUY' else 'danger' }}">
-                                    {{ trade.direction }}
-                                </span>
-                            </td>
-                            <td>
-                                <span class="badge bg-{{ 'secondary' if trade.mode=='PAPER' else 'warning' }}">
-                                    {{ trade.mode }}
-                                </span>
-                            </td>
-                            <td>
-                                {% if trade.mode == 'PAPER' %}
-                                <a href="/convert/{{ trade.id }}" class="btn btn-sm btn-outline-danger">
-                                    🚀 Go Live
-                                </a>
-                                {% else %}
-                                <span class="text-success">Running</span>
+                                {% if t.mode == 'PAPER' %}
+                                <a href="/convert/{{ id }}" class="btn btn-sm btn-outline-danger">🚀 Go Live</a>
                                 {% endif %}
                             </td>
                         </tr>
