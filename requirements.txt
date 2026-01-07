@@ -3,3 +3,4 @@ dhanhq==2.2.0rc1
 requests
 pandas
 pytz
+pip install fastapi uvicorn websockets
