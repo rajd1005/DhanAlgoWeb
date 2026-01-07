@@ -6,11 +6,18 @@ from datetime import datetime
 class SymbolManager:
     def __init__(self, filename="data/instruments.csv"):
         self.filename = filename
+        # Official Dhan Scrip Master URL
         self.url = "https://images.dhan.co/api-data/api-scrip-master.csv"
         self.df = None
         
+        # Ensure data directory exists
+        folder = os.path.dirname(filename)
+        if folder and not os.path.exists(folder):
+            os.makedirs(folder)
+        
         # Download if missing, otherwise load
         if not os.path.exists(self.filename):
+            print("⚠️ Scrip Master not found. Downloading now...")
             self.download_scrips()
         else:
             self.load_instruments()
@@ -44,31 +51,32 @@ class SymbolManager:
                     'SEM_EXPIRY_DATE',      # Expiry (for FNO)
                     'SEM_STRIKE_PRICE',     # Strike (for Opt)
                     'SEM_OPTION_TYPE',      # CE/PE
-                    'SEM_CUSTOM_SYMBOL'     # Description
+                    'SEM_CUSTOM_SYMBOL',    # Description
+                    'SEM_LOT_UNITS'         # Lot Size (Useful for display)
                 ]
                 
                 # 2. Load CSV (Low Memory Mode)
-                self.df = pd.read_csv(self.filename, low_memory=False, usecols=use_cols)
+                # We use specific dtypes to optimize speed
+                dtype_map = {
+                    'SEM_SMST_SECURITY_ID': str,
+                    'SEM_STRIKE_PRICE': float
+                }
+                self.df = pd.read_csv(self.filename, low_memory=False, usecols=use_cols, dtype=dtype_map)
                 
-                # 3. FILTERING LOGIC (The Core Requirement)
+                # 3. FILTERING LOGIC
                 # Keep only NSE, BSE, MCX
                 valid_exchanges = ['NSE', 'BSE', 'MCX']
                 self.df = self.df[self.df['SEM_EXM_EXCH_ID'].isin(valid_exchanges)]
                 
                 # Keep specific Instrument Types
-                # EQUITY = Stocks
-                # INDEX = Spot Indices (Nifty 50, Sensex)
-                # FUTIDX, FUTSTK, FUTCOM = Futures
-                # OPTIDX, OPTSTK, OPTCOM = Options
                 valid_instruments = [
-                    'EQUITY', 'INDEX', 
-                    'FUTIDX', 'FUTSTK', 'FUTCOM', 
-                    'OPTIDX', 'OPTSTK', 'OPTCOM'
+                    'EQUITY', 'INDEX',       # Cash / Spot
+                    'FUTIDX', 'FUTSTK', 'FUTCOM',  # Futures
+                    'OPTIDX', 'OPTSTK', 'OPTCOM'   # Options
                 ]
                 self.df = self.df[self.df['SEM_INSTRUMENT_NAME'].isin(valid_instruments)]
                 
                 # 4. Create a "Smart Display" Name for Search
-                # Logic: Combine Symbol + Expiry + Strike + Option Type for clarity
                 self.df['DISPLAY'] = self.df.apply(self._generate_display_name, axis=1)
                 
                 # 5. Create Search Key (Uppercase for speed)
@@ -88,39 +96,52 @@ class SymbolManager:
         instr = row['SEM_INSTRUMENT_NAME']
         exch = row['SEM_EXM_EXCH_ID']
         
-        if instr in ['EQUITY', 'INDEX']:
-            return f"{symbol} ({exch} {instr})"
+        # Clean up Symbol Name (remove spaces)
+        symbol = str(symbol).strip()
+
+        if instr == 'EQUITY':
+            return f"{symbol} (EQ)"
+        if instr == 'INDEX':
+            return f"{symbol} (INDEX)"
         
         # For F&O (Futures/Options)
-        # Expiry Format: 2024-01-25 -> 25JAN
-        expiry = str(row['SEM_EXPIRY_DATE']).split(' ')[0] 
+        # Parse Expiry: "2024-01-25 00:00:00" -> "25JAN"
+        try:
+            exp_date = pd.to_datetime(row['SEM_EXPIRY_DATE'])
+            expiry_str = exp_date.strftime("%d%b").upper()
+        except:
+            expiry_str = ""
         
         if 'FUT' in instr:
-            return f"{symbol} {expiry} FUT ({exch})"
+            return f"{symbol} {expiry_str} FUT ({exch})"
         
         if 'OPT' in instr:
-            strike = str(row['SEM_STRIKE_PRICE']).replace('.0', '')
+            # Format Strike: 21500.0 -> 21500
+            strike = f"{row['SEM_STRIKE_PRICE']:.0f}"
             opt_type = row['SEM_OPTION_TYPE'] # CE or PE
-            return f"{symbol} {expiry} {strike} {opt_type} ({exch})"
+            return f"{symbol} {expiry_str} {strike} {opt_type} ({exch})"
             
         return f"{symbol} ({exch})"
 
     def search(self, query):
         """
-        Fast Search returning top 15 results.
+        Fast Search returning top 20 results.
         Prioritizes: Indices > Stocks > Futures > Options
         """
         if self.df is None: return []
         
         query = query.upper().strip()
         
-        # Filter 1: Contains Query
+        # Filter: Contains Query
         mask = self.df['SEARCH_KEY'].str.contains(query, na=False)
         results = self.df[mask]
         
-        # Sort Priority: Index/Equity first, then FNO
-        # We limit to 20 results to keep the UI snappy
-        results = results.sort_values(by=['SEM_INSTRUMENT_NAME', 'SEM_TRADING_SYMBOL']).head(20)
+        # Sort Priority: 
+        # 1. Exact match starts with query (e.g. "NIFTY" matches "NIFTY 50" before "BANKNIFTY")
+        # 2. Instrument Type (INDEX > EQUITY > FUT > OPT)
+        
+        # Simple Sort by Name and Type
+        results = results.sort_values(by=['SEM_TRADING_SYMBOL', 'SEM_INSTRUMENT_NAME']).head(20)
         
         output = []
         for _, row in results.iterrows():
@@ -134,13 +155,17 @@ class SymbolManager:
         return output
 
     def get_atm_security(self, index_symbol, spot_price, direction):
-        # ... (Keep previous Auto-ATM Logic) ...
-        # (This remains unchanged from the previous efficient version)
+        """
+        Finds the nearest ATM Option Security ID for Algo Trading.
+        """
         if self.df is None: return None, None
+        
+        # Determine Step Size
         step = 100 if "BANK" in index_symbol.upper() else 50
         strike = round(spot_price / step) * step
         opt_type = "CE" if direction == "BUY" else "PE"
 
+        # Filter for Options
         mask = (
             (self.df['SEM_INSTRUMENT_NAME'].isin(['OPTIDX', 'OPTSTK'])) &
             (self.df['SEM_TRADING_SYMBOL'].str.contains(index_symbol.upper())) &
@@ -150,7 +175,9 @@ class SymbolManager:
         )
         
         matches = self.df[mask].sort_values('EXPIRY_DT')
+        
         if not matches.empty:
-            row = matches.iloc[0]
-            return str(row['SEM_SMST_SECURITY_ID']), row['SEM_TRADING_SYMBOL']
+            row = matches.iloc[0] # Get nearest expiry
+            return str(row['SEM_SMST_SECURITY_ID']), row['DISPLAY']
+            
         return None, None
