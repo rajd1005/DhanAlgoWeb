@@ -1,16 +1,41 @@
 from dhanhq import DhanContext, dhanhq
 import threading
 import time
+import json
+import os
 from datetime import datetime
 
 class TradingEngine:
-    def __init__(self, ..., filename="data/active_trades.json"):
+    # FIXED LINE: We replaced '...' with the real arguments
+    def __init__(self, config_manager, notifier, filename="data/active_trades.json"):
         self.cfg = config_manager
         self.notify = notifier
+        self.filename = filename
+        
+        # Auto-create the data folder if it doesn't exist
+        folder = os.path.dirname(filename)
+        if folder and not os.path.exists(folder):
+            os.makedirs(folder)
+
         self.dhan = None
-        self.active_trades = {} # Stores all trade data
+        self.active_trades = self.load_trades() # Load saved trades
         self.is_running = False
         self.connect_api()
+
+    def load_trades(self):
+        """Loads trades from the JSON file so they persist after restart."""
+        if os.path.exists(self.filename):
+            try:
+                with open(self.filename, 'r') as f:
+                    return json.load(f)
+            except:
+                return {}
+        return {}
+
+    def save_trades(self):
+        """Saves current trades to file."""
+        with open(self.filename, 'w') as f:
+            json.dump(self.active_trades, f, indent=4)
 
     def connect_api(self):
         creds = self.cfg.config['dhan_creds']
@@ -30,7 +55,6 @@ class TradingEngine:
         
         # 2. Logic for LIVE vs PAPER
         trade_id = f"{symbol}_{int(time.time())}"
-        price = 0 # Market Order
         
         status_msg = ""
         
@@ -54,7 +78,7 @@ class TradingEngine:
         else:
             status_msg = "📝 Paper Trade Logged"
 
-        # 3. Save Trade Data (Risk Management Init)
+        # 3. Save Trade Data
         self.active_trades[trade_id] = {
             "id": trade_id,
             "symbol": symbol,
@@ -65,6 +89,7 @@ class TradingEngine:
             "pnl": 0.0,
             "status": "OPEN"
         }
+        self.save_trades() # <--- SAVE TO FILE
 
         # 4. Notify
         msg = f"Symbol: {symbol}\nAction: {direction}\nMode: {mode}\n{status_msg}"
@@ -87,4 +112,5 @@ class TradingEngine:
         # Update Record
         trade['mode'] = "LIVE"
         trade['status'] = "CONVERTED"
+        self.save_trades() # <--- SAVE TO FILE
         return res
