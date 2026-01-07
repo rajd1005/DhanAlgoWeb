@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="card">
+    <div class="card-header">⚙️ System Configuration</div>
+    <div class="card-body">
+        <form method="POST">
+            <h5>Dhan Credentials</h5>
+            <div class="row mb-3">
+                <div class="col">
+                    <input type="text" name="client_id" class="form-control" placeholder="Client ID" value="{{ config.dhan_creds.client_id }}">
+                </div>
+                <div class="col">
+                    <input type="password" name="access_token" class="form-control" placeholder="Access Token" value="{{ config.dhan_creds.access_token }}">
+                </div>
+            </div>
+
+            <h5>Telegram Settings</h5>
+            <div class="mb-3">
+                <input type="text" name="bot_token" class="form-control" placeholder="Bot Token" value="{{ config.telegram.bot_token }}">
+            </div>
+            
+            <h5>Trading Mode</h5>
+            <div class="mb-3">
+                <select name="mode" class="form-select">
+                    <option value="PAPER" {% if config.trading_mode == 'PAPER' %}selected{% endif %}>PAPER TRADING</option>
+                    <option value="LIVE" {% if config.trading_mode == 'LIVE' %}selected{% endif %}>LIVE TRADING</option>
+                </select>
+            </div>
+
+            <button type="submit" class="btn btn-primary">Save Settings</button>
+        </form>
+    </div>
+</div>
+{% endblock %}
