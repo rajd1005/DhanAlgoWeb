@@ -50,25 +50,26 @@ class TradingEngine:
     def save_trades(self):
         with open(self.filename, 'w') as f: json.dump(self.active_trades, f, indent=4)
 
-    # --- PRICE FETCHER (CRITICAL FIX) ---
+    # --- PRICE FETCHER (CRITICAL FIX APPLIED) ---
     def get_latest_price(self, security_id, exchange_segment=None):
         """
         Fetches Live Price using 'ticker_data'.
-        Ensures Security ID is passed as INTEGER.
+        CRITICAL: Converts Security ID to INTEGER for API compatibility.
         """
         if not self.is_connected: return 0.0
         
         # 1. Determine Segment (Default to NSE_EQ if missing)
-        segment = exchange_segment if exchange_segment else self.dhan.NSE
+        segment = exchange_segment if exchange_segment else 'NSE_EQ'
         
         try:
             # FIX: Convert ID to Integer (API Requirement)
             try:
                 sec_id_int = int(security_id)
-            except:
-                sec_id_int = security_id # Fallback if alphanumeric
+            except (ValueError, TypeError):
+                print(f"❌ Error: Invalid Security ID: {security_id}")
+                return 0.0
             
-            # 2. Call Ticker Data API
+            # 2. Call Ticker Data API with Integer ID
             req = {segment: [sec_id_int]}
             response = self.dhan.ticker_data(req)
             
@@ -80,7 +81,7 @@ class TradingEngine:
                     return float(item.get('last_price', 0.0))
                     
         except Exception as e:
-            # print(f"LTP Fetch Error: {e}") 
+            print(f"❌ LTP Fetch Error: {e}")
             pass
             
         return 0.0
@@ -106,11 +107,9 @@ class TradingEngine:
     def place_trade(self, symbol, security_id, direction, qty, channel, sl_points, mode="PAPER"):
         target_channel, forced = self.cfg.get_target_channel(channel)
         
-        # Get Entry Price
+        # Get Entry Price (Force FNO segment for options)
         entry_price = self.get_latest_price(security_id, 'NSE_FNO')
-        if entry_price == 0: 
-            entry_price = self.get_latest_price(security_id, 'NSE_EQ')
-        if entry_price == 0: entry_price = 100.0
+        if entry_price == 0: entry_price = 100.0 # Fallback
             
         if mode == "LIVE" and self.is_connected:
             try:
@@ -170,6 +169,7 @@ class TradingEngine:
             for tid, t in list(self.active_trades.items()):
                 if t['status'] != "ACTIVE": continue
 
+                # Fetch LTP for Options (NSE_FNO)
                 ltp = self.get_latest_price(t['sec_id'], 'NSE_FNO')
                 if ltp == 0: ltp = t['entry_price']
 
