@@ -12,10 +12,12 @@ class SymbolManager:
         self.df = None
         self.is_ready = False 
         
+        # Ensure data folder exists
         folder = os.path.dirname(filename)
         if folder and not os.path.exists(folder):
             os.makedirs(folder)
         
+        # Start Background Loader
         self.loader_thread = threading.Thread(target=self._background_init)
         self.loader_thread.daemon = True
         self.loader_thread.start()
@@ -42,6 +44,7 @@ class SymbolManager:
     def load_instruments(self):
         if os.path.exists(self.filename):
             try:
+                # 1. Load optimized columns
                 use_cols = [
                     'SEM_EXM_EXCH_ID', 'SEM_SMST_SECURITY_ID', 
                     'SEM_TRADING_SYMBOL', 'SEM_INSTRUMENT_NAME', 
@@ -58,10 +61,10 @@ class SymbolManager:
 
                 self.df = pd.read_csv(self.filename, usecols=use_cols, dtype=dtype_map, low_memory=False)
                 
-                # Filter for NSE, BSE, MCX
+                # 2. Filter Exchanges (NSE, BSE, MCX)
                 self.df = self.df[self.df['SEM_EXM_EXCH_ID'].isin(['NSE', 'BSE', 'MCX'])]
                 
-                # Keep Types: Equity, Index, Futures, Options
+                # 3. Filter Instruments (Equity, Index, Futures, Options)
                 valid_instruments = [
                     'EQUITY', 'INDEX', 
                     'FUTIDX', 'FUTSTK', 'FUTCOM', 
@@ -69,31 +72,31 @@ class SymbolManager:
                 ]
                 self.df = self.df[self.df['SEM_INSTRUMENT_NAME'].isin(valid_instruments)]
 
-                # SEARCH OPTIMIZATION
+                # 4. Search & Display Helpers
                 self.df['SEARCH_KEY'] = self.df['SEM_TRADING_SYMBOL'].str.upper()
+                
+                # Smart Display Name (e.g., "NIFTY (INDEX)", "RELIANCE (EQUITY)")
                 self.df['DISPLAY'] = self.df['SEM_TRADING_SYMBOL'] + " (" + self.df['SEM_INSTRUMENT_NAME'].astype(str) + ")"
+                
                 self.df['EXPIRY_DT'] = pd.to_datetime(self.df['SEM_EXPIRY_DATE'], errors='coerce')
 
-                # MAP API SEGMENTS (Crucial for Price Fetching)
-                # Logic: 
-                # NSE + EQUITY -> NSE_EQ
-                # NSE + INDEX  -> IDX_I
-                # BSE + EQUITY -> BSE_EQ
-                # BSE + INDEX  -> IDX_I
-                # MCX -> MCX_COMM
+                # 5. Segment Mapping (Crucial for Price Fetching)
                 def get_segment(row):
                     exch = row['SEM_EXM_EXCH_ID']
                     instr = row['SEM_INSTRUMENT_NAME']
                     
-                    if instr == 'INDEX': return 'IDX_I'
-                    if exch == 'MCX': return 'MCX_COMM'
+                    if instr == 'INDEX': return 'IDX_I'     # Fixes Index Price
+                    if exch == 'MCX': return 'MCX_COMM'     # Fixes Commodity
+                    
                     if exch == 'NSE':
-                        if instr == 'EQUITY': return 'NSE_EQ'
-                        return 'NSE_FNO' # Futures/Options
+                        if instr == 'EQUITY': return 'NSE_EQ' # Fixes Stock Price
+                        return 'NSE_FNO' # Futures & Options
+                        
                     if exch == 'BSE':
                         if instr == 'EQUITY': return 'BSE_EQ'
                         return 'BSE_FNO'
-                    return 'NSE_EQ' # Default
+                        
+                    return 'NSE_EQ'
 
                 self.df['API_SEGMENT'] = self.df.apply(get_segment, axis=1)
 
@@ -106,21 +109,30 @@ class SymbolManager:
 
     def search(self, query):
         """
-        Returns top 15 matches with API_SEGMENT included.
-        Strictly Filters: EQUITY and INDEX only for the main search box.
+        Returns top 15 matches.
+        Includes: EQUITY, INDEX, and FUTURES.
+        Sorts by length to prioritize exact matches (e.g. 'NIFTY' before 'NIFTYBEES').
         """
         if not self.is_ready or self.df is None: return []
         
         try:
             query = query.upper().strip()
             
-            # 1. Match Name
+            # 1. Filter by Name
             mask_query = self.df['SEARCH_KEY'].str.contains(query, na=False)
             
-            # 2. STRICT FILTER: Only Stocks (EQUITY) or Indices (INDEX)
-            mask_type = self.df['SEM_INSTRUMENT_NAME'].isin(['EQUITY', 'INDEX'])
+            # 2. Filter by Type (Show Stocks, Indices, and Futures)
+            # We explicitly exclude Options from the search box to keep it clean
+            allowed_types = ['EQUITY', 'INDEX', 'FUTIDX', 'FUTSTK', 'FUTCOM']
+            mask_type = self.df['SEM_INSTRUMENT_NAME'].isin(allowed_types)
             
-            results = self.df[mask_query & mask_type].head(15)
+            # Apply Filters
+            results = self.df[mask_query & mask_type].copy()
+            
+            # 3. SMART SORT: Sort by length of symbol
+            # This ensures "NIFTY" (5 chars) comes before "NIFTYBEES" (9 chars)
+            results['len'] = results['SEM_TRADING_SYMBOL'].str.len()
+            results = results.sort_values(by=['len', 'SEM_TRADING_SYMBOL']).head(15)
             
             output = []
             for _, row in results.iterrows():
@@ -129,7 +141,7 @@ class SymbolManager:
                     "id": row['SEM_SMST_SECURITY_ID'],
                     "exchange": row['SEM_EXM_EXCH_ID'],
                     "display": row['DISPLAY'],
-                    "segment": row['API_SEGMENT'], # <--- KEY FIX
+                    "segment": row['API_SEGMENT'],
                     "type": row['SEM_INSTRUMENT_NAME']
                 })
             return output
@@ -143,6 +155,7 @@ class SymbolManager:
             strike = round(spot_price / step) * step
             opt_type = "CE" if direction == "BUY" else "PE"
 
+            # Filter for Options (OPTIDX, OPTSTK)
             mask = (
                 (self.df['SEM_INSTRUMENT_NAME'].isin(['OPTIDX', 'OPTSTK'])) &
                 (self.df['SEARCH_KEY'].str.contains(index_symbol.upper())) &
