@@ -95,11 +95,7 @@
                             </td>
                             <td>{{ t.entry_price }}</td>
                             <td>{{ t.max_price }}</td>
-                            <td>
-                                <span class="badge bg-{{ 'warning' if t.mode=='PAPER' else 'danger' }}">
-                                    {{ t.mode }}
-                                </span>
-                            </td>
+                            <td><span class="badge bg-warning text-dark">{{ t.mode }}</span></td>
                             <td>
                                 {% if t.mode == 'PAPER' %}
                                 <a href="/convert/{{ id }}" class="btn btn-sm btn-outline-danger">Go Live</a>
@@ -131,10 +127,7 @@
                     statusBadge.innerText = 'Disconnected';
                 }
             })
-            .catch(() => {
-                statusBadge.className = 'badge bg-secondary';
-                statusBadge.innerText = 'Offline';
-            });
+            .catch(() => statusBadge.innerText = 'Offline');
     }
     setInterval(checkStatus, 3000);
     checkStatus();
@@ -144,15 +137,12 @@
     const sugg = document.getElementById('suggestions');
     const spotLabel = document.getElementById('spotLtp');
     const underlyingSym = document.getElementById('underlyingSymbol');
-    
     const sideSel = document.getElementById('sideSelect');
     const strikeSel = document.getElementById('strikeSelect');
-    
     const optName = document.getElementById('optName');
     const optLtp = document.getElementById('optLtp');
     const finalSecId = document.getElementById('finalSecId');
     const finalSymName = document.getElementById('finalSymName');
-
     let currentSpotPrice = 0;
 
     // Search
@@ -167,34 +157,35 @@
         data.forEach(item => {
             const a = document.createElement('button');
             a.className = 'list-group-item list-group-item-action text-start d-flex justify-content-between align-items-center';
-            a.innerHTML = `<span>${item.display}</span>`;
+            a.innerHTML = `<span>${item.display}</span><small class="badge bg-light text-dark">${item.type}</small>`;
             a.type = "button";
             
             a.onclick = async () => {
-                // 1. Set Symbol
+                // 1. Set Input
                 inp.value = item.display;
                 underlyingSym.value = item.symbol;
                 sugg.innerHTML = '';
                 
-                // 2. Fetch Spot Price
+                // 2. Fetch Spot Price (USING SEGMENT!)
                 spotLabel.innerText = "Fetching...";
-                strikeSel.innerHTML = '<option>Loading Options...</option>';
+                strikeSel.innerHTML = '<option>Loading...</option>';
                 strikeSel.disabled = true;
                 sideSel.disabled = true;
 
-                const priceRes = await fetch(`/api/ltp?id=${item.id}`);
+                // PASS SEGMENT TO API
+                const priceRes = await fetch(`/api/ltp?id=${item.id}&segment=${item.segment}`);
                 const priceData = await priceRes.json();
+                
                 currentSpotPrice = priceData.ltp;
                 spotLabel.innerText = `₹ ${currentSpotPrice}`;
                 
-                // 3. Try Loading Option Chain
+                // 3. Load Options
                 loadOptionChain();
             };
             sugg.appendChild(a);
         });
     });
 
-    // Load Option Chain
     async function loadOptionChain() {
         const sym = underlyingSym.value;
         const dir = sideSel.value;
@@ -204,12 +195,9 @@
         const strikes = await res.json();
         
         strikeSel.innerHTML = '';
-        
         if (strikes.length > 0) {
-            // Options Found! Enable inputs
             sideSel.disabled = false;
             strikeSel.disabled = false;
-            
             strikes.forEach(s => {
                 const opt = document.createElement('option');
                 opt.value = s.id;
@@ -220,39 +208,31 @@
             });
             updateOptionDetails();
         } else {
-            // No Options Found (e.g. Small Cap Stock)
             const opt = document.createElement('option');
             opt.text = "No Options Available";
             strikeSel.appendChild(opt);
-            strikeSel.disabled = true;
-            sideSel.disabled = true;
-            
-            optName.innerText = "Stock Selected";
-            optLtp.innerText = "-";
-            finalSecId.value = ""; // Clear ID so trade fails if they try
+            optName.innerText = "Stock Selected (Equity)";
+            // Set ID to underlying Stock ID if user wants to trade equity
+            // But current logic is built for Options. 
+            // We disable trading if no options.
+            finalSecId.value = ""; 
         }
     }
 
-    // Update Details
     async function updateOptionDetails() {
         if(strikeSel.selectedIndex < 0 || strikeSel.disabled) return;
-        
         const opt = strikeSel.options[strikeSel.selectedIndex];
-        
         optName.innerText = opt.dataset.name || "-";
         optLtp.innerText = "...";
         finalSecId.value = opt.value;
         finalSymName.value = opt.dataset.name;
-        
         if (opt.value) {
             const res = await fetch(`/api/option-ltp?id=${opt.value}`);
             const data = await res.json();
             optLtp.innerText = `₹ ${data.ltp}`;
         }
     }
-
     sideSel.addEventListener('change', loadOptionChain);
     strikeSel.addEventListener('change', updateOptionDetails);
-
 </script>
 {% endblock %}
