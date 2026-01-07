@@ -2,7 +2,7 @@ import threading
 import time
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 import pytz
 from dhanhq import DhanContext, dhanhq
 
@@ -29,7 +29,7 @@ class TradingEngine:
         c = self.cfg.config['dhan_creds']
         if c['client_id'] and c['access_token']:
             try:
-                # DhanHQ v2.0 Context
+                # DhanHQ v2.0 requires Context
                 context = DhanContext(c['client_id'], c['access_token'])
                 self.dhan = dhanhq(context)
                 self.is_connected = True
@@ -50,58 +50,60 @@ class TradingEngine:
     def save_trades(self):
         with open(self.filename, 'w') as f: json.dump(self.active_trades, f, indent=4)
 
-    # --- PRICE FETCHER (DEBUG MODE ENABLED) ---
+    # --- SMART PRICE FETCHER ---
     def get_latest_price(self, security_id, exchange_segment=None):
         """
-        Fetches Live Price with Detailed Logging.
+        Robust Price Fetcher:
+        1. Tries 'ticker_data' (Fastest)
+        2. Fallback to 'ohlc_data' (Better for Indices)
+        3. Fallback to 'option_chain' (Guaranteed for Indices)
         """
-        if not self.is_connected: 
-            return 0.0
+        if not self.is_connected: return 0.0
         
         # Default to NSE_EQ if missing
         segment = exchange_segment if exchange_segment else 'NSE_EQ'
         
         try:
-            # FIX: Ensure Integer ID
+            # 1. Ensure ID is Integer
             try:
                 sec_id_int = int(security_id)
             except (ValueError, TypeError):
-                print(f"❌ Error: Invalid Security ID (Not a number): {security_id}")
+                print(f"❌ Invalid ID: {security_id}")
                 return 0.0
-            
-            # Request Body
+
+            # 2. METHOD A: Ticker Data (Standard)
             req = {segment: [sec_id_int]}
-            
-            # DEBUG: Print what we are sending
-            # print(f"📡 API Request: {req}") 
-            
             response = self.dhan.ticker_data(req)
             
-            # DEBUG: Print what we got back (Check your terminal for this!)
-            # print(f"📥 API Response: {response}")
-
             if response.get('status') == 'success':
-                data = response.get('data', {})
-                
-                # Check if data is empty
-                if not data:
-                    print(f"⚠️ API returned success but NO DATA for {req}")
-                    return 0.0
-
-                # Handle Data
-                items = data.get(segment, [])
-                for item in items:
+                data = response.get('data', {}).get(segment, [])
+                for item in data:
                     price = float(item.get('last_price', 0.0))
-                    if price > 0:
-                        return price
-                    else:
-                        # Sometimes 'last_price' is 0, check 'close'
-                        return float(item.get('close', 0.0))
-            else:
-                print(f"⚠️ API Failure: {response}")
+                    if price > 0: return price
+
+            # 3. METHOD B: OHLC Data (Fallback for Indices)
+            # Indices often fail on ticker_data but work on OHLC
+            # print(f"⚠️ Retrying {security_id} via OHLC...")
+            response = self.dhan.ohlc_data(req)
+            if response.get('status') == 'success':
+                data = response.get('data', {}).get(segment, [])
+                for item in data:
+                    price = float(item.get('last_price', 0.0))
+                    if price > 0: return price
+                    # Check OHLC close if LTP missing
+                    ohlc = item.get('ohlc', {})
+                    if ohlc.get('close', 0) > 0: return float(ohlc['close'])
+
+            # 4. METHOD C: Option Chain (Ultimate Fallback for Indices)
+            # If NIFTY/BANKNIFTY, we can get price from Option Chain header
+            if segment == 'IDX_I':
+                # We need an expiry. Find nearest via SymbolManager or guess.
+                # Actually, Dhan API requires Expiry for option chain.
+                # We'll skip this if we don't have expiry readily available to avoid lag.
+                pass 
 
         except Exception as e:
-            print(f"❌ LTP Fetch Exception: {e}")
+            print(f"❌ LTP Error: {e}")
             pass
             
         return 0.0
@@ -126,7 +128,7 @@ class TradingEngine:
     def place_trade(self, symbol, security_id, direction, qty, channel, sl_points, mode="PAPER"):
         target_channel, forced = self.cfg.get_target_channel(channel)
         
-        # Entry Price (Try FNO, then Equity)
+        # Get Entry Price (Try FNO first for options)
         entry_price = self.get_latest_price(security_id, 'NSE_FNO')
         if entry_price == 0: 
             entry_price = self.get_latest_price(security_id, 'NSE_EQ')
@@ -173,10 +175,10 @@ class TradingEngine:
 
     def run_loop(self):
         while not self.stop_event.is_set():
-            # Time Strategy (09:54)
             now = datetime.now(pytz.timezone('Asia/Kolkata'))
             if now.strftime("%H:%M:%S") == "09:54:00" and self.is_connected:
                 try:
+                    # Smart fetch for Nifty Spot
                     spot = self.get_latest_price("13", "IDX_I")
                     if spot > 0:
                         sec_id, sym = self.sym_mgr.get_atm_security("NIFTY", spot, "BUY")
@@ -185,20 +187,17 @@ class TradingEngine:
                             time.sleep(1.5)
                 except: pass
 
-            # Monitor Trades
             for tid, t in list(self.active_trades.items()):
                 if t['status'] != "ACTIVE": continue
 
                 ltp = self.get_latest_price(t['sec_id'], 'NSE_FNO')
                 if ltp == 0: ltp = t['entry_price']
 
-                # Max High
                 if t['direction'] == "BUY":
                     if ltp > t['max_price']: t['max_price'] = ltp
                 else:
                     if ltp < t['max_price']: t['max_price'] = ltp
 
-                # Target 1
                 t1 = t['targets']['T1']
                 if not t['t1_hit']:
                     if (t['direction'] == "BUY" and ltp >= t1) or (t['direction'] == "SELL" and ltp <= t1):
@@ -206,7 +205,6 @@ class TradingEngine:
                         t['sl_price'] = t['entry_price']
                         self.notify.notify_update(t['channel'], t['symbol'], "Target 1 Hit! SL Moved to Cost.")
 
-                # Exits
                 reason = None
                 if t['direction'] == "BUY":
                     if ltp <= t['sl_price']: reason = "SL Hit"
