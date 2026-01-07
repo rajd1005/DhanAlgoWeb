@@ -3,9 +3,9 @@
 <div class="row">
     <div class="col-md-5 mb-3">
         <div class="card shadow-sm">
-            <div class="card-header bg-primary text-white d-flex justify-content-between">
+            <div class="card-header bg-primary text-white d-flex justify-content-between align-items-center">
                 <span>⚡ Quick Trade ({{ mode }})</span>
-                <span id="apiStatus" class="badge bg-light text-dark">Connecting...</span>
+                <span id="apiStatus" class="badge bg-warning text-dark">Checking...</span>
             </div>
             <div class="card-body">
                 <form action="/trade" method="POST" autocomplete="off">
@@ -17,7 +17,6 @@
                             <span class="input-group-text fw-bold" id="spotLtp">₹ 0.00</span>
                         </div>
                         <div id="suggestions" class="list-group position-absolute w-100 shadow" style="z-index:1000"></div>
-                        
                         <input type="hidden" id="underlyingSymbol">
                     </div>
 
@@ -30,7 +29,7 @@
                             </select>
                         </div>
                         <div class="col-8">
-                            <label class="form-label text-muted small">3. Select Strike (ATM Selected)</label>
+                            <label class="form-label text-muted small">3. Select Strike</label>
                             <select id="strikeSelect" class="form-select">
                                 <option value="">Select Symbol First</option>
                             </select>
@@ -38,7 +37,7 @@
                     </div>
 
                     <div class="alert alert-secondary p-2 mb-2 d-flex justify-content-between align-items-center">
-                        <small id="optName">No Option Selected</small>
+                        <small id="optName" class="text-truncate" style="max-width: 150px;">No Option Selected</small>
                         <strong id="optLtp" class="text-primary">₹ 0.00</strong>
                     </div>
 
@@ -47,17 +46,17 @@
 
                     <div class="row mb-3">
                         <div class="col">
-                            <label class="form-label text-muted small">Quantity</label>
+                            <label class="form-label text-muted small">Qty</label>
                             <input type="number" name="qty" class="form-control" value="25">
                         </div>
                         <div class="col">
-                            <label class="form-label text-muted small">SL Points</label>
+                            <label class="form-label text-muted small">SL Pts</label>
                             <input type="number" name="sl" class="form-control" value="20">
                         </div>
                     </div>
 
                     <div class="mb-3">
-                        <label class="form-label text-muted small">Notify Channel</label>
+                        <label class="form-label text-muted small">Channel</label>
                         <select name="channel" class="form-select">
                             {% for c in channels %}
                             <option value="{{ c }}">{{ c }}</option>
@@ -118,23 +117,45 @@
 </div>
 
 <script>
+    // --- 1. CONNECTION STATUS CHECKER ---
+    const statusBadge = document.getElementById('apiStatus');
+    
+    function checkStatus() {
+        fetch('/api/status')
+            .then(res => res.json())
+            .then(data => {
+                if(data.connected) {
+                    statusBadge.className = 'badge bg-success';
+                    statusBadge.innerText = 'Online';
+                } else {
+                    statusBadge.className = 'badge bg-danger';
+                    statusBadge.innerText = 'Disconnected';
+                }
+            })
+            .catch(() => {
+                statusBadge.className = 'badge bg-secondary';
+                statusBadge.innerText = 'Offline';
+            });
+    }
+    // Check every 2 seconds
+    setInterval(checkStatus, 2000);
+    checkStatus(); // Run immediately on load
+
+    // --- 2. TRADING LOGIC ---
     const inp = document.getElementById('symInput');
     const sugg = document.getElementById('suggestions');
     const spotLabel = document.getElementById('spotLtp');
     const underlyingSym = document.getElementById('underlyingSymbol');
-    
     const sideSel = document.getElementById('sideSelect');
     const strikeSel = document.getElementById('strikeSelect');
-    
     const optName = document.getElementById('optName');
     const optLtp = document.getElementById('optLtp');
-    
     const finalSecId = document.getElementById('finalSecId');
     const finalSymName = document.getElementById('finalSymName');
 
     let currentSpotPrice = 0;
 
-    // 1. Symbol Search & Spot LTP Fetch
+    // Search
     inp.addEventListener('input', async (e) => {
         const val = e.target.value;
         if(val.length < 2) { sugg.innerHTML = ''; return; }
@@ -149,79 +170,65 @@
             a.innerText = item.display;
             a.type = "button";
             a.onclick = async () => {
-                // Set UI
                 inp.value = item.symbol;
                 underlyingSym.value = item.symbol;
                 sugg.innerHTML = '';
                 
-                // Fetch Spot LTP
-                spotLabel.innerText = "Fetching...";
+                // Get Spot Price
+                spotLabel.innerText = "...";
                 const priceRes = await fetch(`/api/ltp?id=${item.id}`);
                 const priceData = await priceRes.json();
                 currentSpotPrice = priceData.ltp;
                 spotLabel.innerText = `₹ ${currentSpotPrice}`;
                 
-                // Trigger Option Chain Load
                 loadOptionChain();
             };
             sugg.appendChild(a);
         });
     });
 
-    // 2. Load Option Chain (Dropdown)
+    // Load Chain
     async function loadOptionChain() {
         const sym = underlyingSym.value;
         const dir = sideSel.value;
-        
         if (!sym || currentSpotPrice === 0) return;
         
-        strikeSel.innerHTML = '<option>Loading Chain...</option>';
+        strikeSel.innerHTML = '<option>Loading...</option>';
         
         const res = await fetch(`/api/options?symbol=${sym}&spot=${currentSpotPrice}&direction=${dir}`);
         const strikes = await res.json();
         
         strikeSel.innerHTML = '';
-        
         strikes.forEach(s => {
             const opt = document.createElement('option');
-            opt.value = s.id; // Security ID of the Option
+            opt.value = s.id;
             opt.text = `${s.strike} ${s.is_atm ? '(ATM)' : ''}`;
             opt.dataset.name = s.name;
-            
             if (s.is_atm) opt.selected = true;
-            
             strikeSel.appendChild(opt);
         });
-        
-        // Trigger Option LTP Fetch for the selected one
         updateOptionDetails();
     }
 
-    // 3. Update Option LTP when Selection Changes
+    // Update Details
     async function updateOptionDetails() {
-        const selectedOpt = strikeSel.options[strikeSel.selectedIndex];
-        if (!selectedOpt) return;
+        if(strikeSel.selectedIndex < 0) return;
+        const opt = strikeSel.options[strikeSel.selectedIndex];
         
-        const secId = selectedOpt.value;
-        const name = selectedOpt.dataset.name;
+        optName.innerText = opt.dataset.name || "Selected";
+        optLtp.innerText = "...";
+        finalSecId.value = opt.value;
+        finalSymName.value = opt.dataset.name;
         
-        optName.innerText = name;
-        optLtp.innerText = "₹ ...";
-        
-        // Update Hidden Fields
-        finalSecId.value = secId;
-        finalSymName.value = name;
-        
-        if (secId) {
-            const res = await fetch(`/api/option-ltp?id=${secId}`);
+        if (opt.value) {
+            const res = await fetch(`/api/option-ltp?id=${opt.value}`);
             const data = await res.json();
             optLtp.innerText = `₹ ${data.ltp}`;
         }
     }
 
-    // Event Listeners
-    sideSel.addEventListener('change', loadOptionChain); // Reload chain if Side changes (CE vs PE)
-    strikeSel.addEventListener('change', updateOptionDetails); // Fetch new LTP if Strike changes
+    sideSel.addEventListener('change', loadOptionChain);
+    strikeSel.addEventListener('change', updateOptionDetails);
 
 </script>
 {% endblock %}
