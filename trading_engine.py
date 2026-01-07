@@ -27,17 +27,13 @@ class TradingEngine:
         self.connect_api()
 
     def connect_api(self):
-        """
-        Connects to Dhan API using DhanContext (Required for v2.0+).
-        """
+        """Connects to Dhan API using DhanContext."""
         c = self.cfg.config['dhan_creds']
         if c['client_id'] and c['access_token']:
             try:
-                # --- FIX START ---
-                # We must create a Context object first!
+                # Create Context (Required for v2.0)
                 context = DhanContext(c['client_id'], c['access_token'])
                 self.dhan = dhanhq(context)
-                # --- FIX END ---
                 
                 self.is_connected = True
                 print("✅ API Connected Successfully")
@@ -57,19 +53,42 @@ class TradingEngine:
     def save_trades(self):
         with open(self.filename, 'w') as f: json.dump(self.active_trades, f, indent=4)
 
-    # --- HELPERS ---
+    # --- SMART PRICE FETCHER (FIXED) ---
     
     def get_latest_price(self, security_id, exchange_segment=None):
+        """
+        Fetches Live LTP. Automatically tries Index/Equity segments if unknown.
+        """
         if not self.is_connected: return 0.0
-        if not exchange_segment: exchange_segment = self.dhan.NSE
-        try:
-            quote = self.dhan.get_quote(exchange_segment, security_id)
-            if quote and 'data' in quote:
-                return float(quote['data']['last_price'])
-        except: pass
-        return 0.0
+        
+        # 1. Helper to try a specific segment
+        def fetch(segment):
+            try:
+                q = self.dhan.get_quote(segment, security_id)
+                if q and 'data' in q and 'last_price' in q['data']:
+                    return float(q['data']['last_price'])
+            except: pass
+            return 0.0
+
+        # 2. If segment provided, use it
+        if exchange_segment:
+            return fetch(exchange_segment)
+
+        # 3. If no segment (e.g. from Search), try standard Equity first
+        price = fetch(self.dhan.NSE) # NSE_EQ
+        if price > 0: return price
+        
+        # 4. If 0, try INDEX (Fix for NIFTY/BANKNIFTY)
+        price = fetch(self.dhan.INDEX) # IDX_I
+        if price > 0: return price
+        
+        # 5. Try MCX (Commodity)
+        price = fetch(self.dhan.MCX)
+        
+        return price
 
     def get_option_chain_data(self, symbol, spot_price):
+        """Generates ATM Strikes."""
         step = 100 if "BANK" in symbol.upper() else 50
         atm_strike = round(spot_price / step) * step
         strikes = []
@@ -89,8 +108,12 @@ class TradingEngine:
     def place_trade(self, symbol, security_id, direction, qty, channel, sl_points, mode="PAPER"):
         target_channel, forced = self.cfg.get_target_channel(channel)
         
+        # Smart Fetch for Entry Price
         entry_price = self.get_latest_price(security_id, self.dhan.NSE_FNO)
-        if entry_price == 0: entry_price = 100.0
+        if entry_price == 0: 
+            # Try Equity/Index if FNO failed (fallback logic)
+            entry_price = self.get_latest_price(security_id)
+        if entry_price == 0: entry_price = 100.0 # Final Fallback
             
         if mode == "LIVE" and self.is_connected:
             try:
@@ -138,12 +161,13 @@ class TradingEngine:
             if now.strftime("%H:%M:%S") == "09:54:00":
                 if self.is_connected:
                     try:
-                        q = self.dhan.get_quote(self.dhan.NSE, "13") 
-                        spot = float(q['data']['last_price'])
-                        sec_id, sym = self.sym_mgr.get_atm_security("NIFTY", spot, "BUY")
-                        if sec_id:
-                            self.place_trade(sym, sec_id, "BUY", 50, "VIP Channel", 20, "PAPER")
-                            time.sleep(1.5)
+                        # Smart fetch for Nifty Spot
+                        spot = self.get_latest_price("13", self.dhan.INDEX)
+                        if spot > 0:
+                            sec_id, sym = self.sym_mgr.get_atm_security("NIFTY", spot, "BUY")
+                            if sec_id:
+                                self.place_trade(sym, sec_id, "BUY", 50, "VIP Channel", 20, "PAPER")
+                                time.sleep(1.5)
                     except: pass
 
             # Monitor Trades
