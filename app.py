@@ -24,7 +24,15 @@ def inject_globals():
 def index():
     return render_template('index.html', trades=engine.active_trades)
 
-# --- API ROUTES FOR LIVE FETCHING ---
+# --- NEW STATUS ROUTE ---
+@app.route('/api/status')
+def api_status():
+    """Checks if Dhan API is connected."""
+    return jsonify({
+        "connected": engine.is_connected,
+        "mode": cfg.config['trading_mode']
+    })
+# ------------------------
 
 @app.route('/api/search')
 def search():
@@ -34,34 +42,24 @@ def search():
 
 @app.route('/api/ltp')
 def get_ltp():
-    """Fetch live price for a Security ID."""
     sec_id = request.args.get('id')
-    # Assuming Equity/Index for search results (Exchange ID 1/11 for NSE/BSE)
-    # You might need logic to switch segment based on symbol type
-    price = engine.get_latest_price(sec_id, engine.dhan.NSE) 
+    price = engine.get_latest_price(sec_id) # Uses the smart fetcher
     return jsonify({"ltp": price})
 
 @app.route('/api/options')
 def get_options():
-    """Returns calculated strikes and ATM for a symbol."""
     symbol = request.args.get('symbol')
     spot_price = float(request.args.get('spot', 0))
-    direction = request.args.get('direction', 'BUY') # BUY=CE, SELL=PE (Usually)
+    direction = request.args.get('direction', 'BUY')
     
     strikes, atm = engine.get_option_chain_data(symbol, spot_price)
-    
-    # We also need to resolve these Strikes to Security IDs using SymbolManager
-    # This ensures we get the *actual* contract ID for the nearest expiry
     
     option_list = []
     opt_type = "CE" if direction == "BUY" else "PE"
     
     for stk in strikes:
-        sec_id, name = sym_mgr.get_atm_security(symbol, stk, direction) # Reusing ATM logic for specific strike
-        
-        # Override ATM fetch: The helper finds specific strike if we pass it as 'spot'
-        # Because helper logic: round(spot) -> matches strike. 
-        # If we pass exact strike as spot, it rounds to itself.
+        # Use SymbolManager to find the specific Option Security ID
+        sec_id, name = sym_mgr.get_atm_security(symbol, stk, direction)
         
         option_list.append({
             "strike": stk,
@@ -74,19 +72,15 @@ def get_options():
 
 @app.route('/api/option-ltp')
 def get_option_ltp():
-    """Fetch live price for Option Contract."""
     sec_id = request.args.get('id')
+    # Try fetching option price
     price = engine.get_latest_price(sec_id, engine.dhan.NSE_FNO)
     return jsonify({"ltp": price})
 
-# --- END API ROUTES ---
-
 @app.route('/trade', methods=['POST'])
 def trade():
-    # Use the FINAL selected Option ID, not the underlying Index ID
     sec_id = request.form.get('final_security_id') 
     symbol = request.form.get('final_symbol_name')
-    
     direction = request.form.get('direction')
     qty = int(request.form.get('qty', 0))
     sl = float(request.form.get('sl', 0))
