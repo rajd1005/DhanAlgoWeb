@@ -11,9 +11,9 @@
                 <form action="/trade" method="POST" autocomplete="off">
                     
                     <div class="mb-2 position-relative">
-                        <label class="form-label text-muted small">1. Search Index/Stock</label>
+                        <label class="form-label text-muted small">1. Search Stock / Index</label>
                         <div class="input-group">
-                            <input type="text" id="symInput" class="form-control" placeholder="e.g. NIFTY">
+                            <input type="text" id="symInput" class="form-control" placeholder="e.g. RELIANCE, NIFTY">
                             <span class="input-group-text fw-bold" id="spotLtp">₹ 0.00</span>
                         </div>
                         <div id="suggestions" class="list-group position-absolute w-100 shadow" style="z-index:1000"></div>
@@ -23,21 +23,21 @@
                     <div class="row mb-2">
                         <div class="col-4">
                             <label class="form-label text-muted small">2. Side</label>
-                            <select name="direction" id="sideSelect" class="form-select">
+                            <select name="direction" id="sideSelect" class="form-select" disabled>
                                 <option value="BUY">BUY (CE)</option>
                                 <option value="SELL">SELL (PE)</option>
                             </select>
                         </div>
                         <div class="col-8">
                             <label class="form-label text-muted small">3. Select Strike</label>
-                            <select id="strikeSelect" class="form-select">
-                                <option value="">Select Symbol First</option>
+                            <select id="strikeSelect" class="form-select" disabled>
+                                <option value="">Select Stock First</option>
                             </select>
                         </div>
                     </div>
 
                     <div class="alert alert-secondary p-2 mb-2 d-flex justify-content-between align-items-center">
-                        <small id="optName" class="text-truncate" style="max-width: 150px;">No Option Selected</small>
+                        <small id="optName" class="text-truncate" style="max-width: 150px;">-</small>
                         <strong id="optLtp" class="text-primary">₹ 0.00</strong>
                     </div>
 
@@ -117,9 +117,8 @@
 </div>
 
 <script>
-    // --- 1. CONNECTION STATUS CHECKER ---
+    // --- STATUS CHECKER ---
     const statusBadge = document.getElementById('apiStatus');
-    
     function checkStatus() {
         fetch('/api/status')
             .then(res => res.json())
@@ -137,17 +136,18 @@
                 statusBadge.innerText = 'Offline';
             });
     }
-    // Check every 2 seconds
-    setInterval(checkStatus, 2000);
-    checkStatus(); // Run immediately on load
+    setInterval(checkStatus, 3000);
+    checkStatus();
 
-    // --- 2. TRADING LOGIC ---
+    // --- TRADING LOGIC ---
     const inp = document.getElementById('symInput');
     const sugg = document.getElementById('suggestions');
     const spotLabel = document.getElementById('spotLtp');
     const underlyingSym = document.getElementById('underlyingSymbol');
+    
     const sideSel = document.getElementById('sideSelect');
     const strikeSel = document.getElementById('strikeSelect');
+    
     const optName = document.getElementById('optName');
     const optLtp = document.getElementById('optLtp');
     const finalSecId = document.getElementById('finalSecId');
@@ -166,56 +166,80 @@
         sugg.innerHTML = '';
         data.forEach(item => {
             const a = document.createElement('button');
-            a.className = 'list-group-item list-group-item-action text-start';
-            a.innerText = item.display;
+            a.className = 'list-group-item list-group-item-action text-start d-flex justify-content-between align-items-center';
+            a.innerHTML = `<span>${item.display}</span>`;
             a.type = "button";
+            
             a.onclick = async () => {
-                inp.value = item.symbol;
+                // 1. Set Symbol
+                inp.value = item.display;
                 underlyingSym.value = item.symbol;
                 sugg.innerHTML = '';
                 
-                // Get Spot Price
-                spotLabel.innerText = "...";
+                // 2. Fetch Spot Price
+                spotLabel.innerText = "Fetching...";
+                strikeSel.innerHTML = '<option>Loading Options...</option>';
+                strikeSel.disabled = true;
+                sideSel.disabled = true;
+
                 const priceRes = await fetch(`/api/ltp?id=${item.id}`);
                 const priceData = await priceRes.json();
                 currentSpotPrice = priceData.ltp;
                 spotLabel.innerText = `₹ ${currentSpotPrice}`;
                 
+                // 3. Try Loading Option Chain
                 loadOptionChain();
             };
             sugg.appendChild(a);
         });
     });
 
-    // Load Chain
+    // Load Option Chain
     async function loadOptionChain() {
         const sym = underlyingSym.value;
         const dir = sideSel.value;
         if (!sym || currentSpotPrice === 0) return;
         
-        strikeSel.innerHTML = '<option>Loading...</option>';
-        
         const res = await fetch(`/api/options?symbol=${sym}&spot=${currentSpotPrice}&direction=${dir}`);
         const strikes = await res.json();
         
         strikeSel.innerHTML = '';
-        strikes.forEach(s => {
+        
+        if (strikes.length > 0) {
+            // Options Found! Enable inputs
+            sideSel.disabled = false;
+            strikeSel.disabled = false;
+            
+            strikes.forEach(s => {
+                const opt = document.createElement('option');
+                opt.value = s.id;
+                opt.text = `${s.strike} ${s.is_atm ? '(ATM)' : ''}`;
+                opt.dataset.name = s.name;
+                if (s.is_atm) opt.selected = true;
+                strikeSel.appendChild(opt);
+            });
+            updateOptionDetails();
+        } else {
+            // No Options Found (e.g. Small Cap Stock)
             const opt = document.createElement('option');
-            opt.value = s.id;
-            opt.text = `${s.strike} ${s.is_atm ? '(ATM)' : ''}`;
-            opt.dataset.name = s.name;
-            if (s.is_atm) opt.selected = true;
+            opt.text = "No Options Available";
             strikeSel.appendChild(opt);
-        });
-        updateOptionDetails();
+            strikeSel.disabled = true;
+            sideSel.disabled = true;
+            
+            optName.innerText = "Stock Selected";
+            optLtp.innerText = "-";
+            finalSecId.value = ""; // Clear ID so trade fails if they try
+        }
     }
 
     // Update Details
     async function updateOptionDetails() {
-        if(strikeSel.selectedIndex < 0) return;
+        if(strikeSel.selectedIndex < 0 || strikeSel.disabled) return;
+        
         const opt = strikeSel.options[strikeSel.selectedIndex];
         
-        optName.innerText = opt.dataset.name || "Selected";
+        optName.innerText = opt.dataset.name || "-";
         optLtp.innerText = "...";
         finalSecId.value = opt.value;
         finalSymName.value = opt.dataset.name;
