@@ -1,42 +1,63 @@
 {% extends "base.html" %}
 {% block content %}
 <div class="row">
-    <div class="col-md-4 mb-3">
+    <div class="col-md-5 mb-3">
         <div class="card shadow-sm">
-            <div class="card-header bg-primary text-white">⚡ Quick Trade ({{ mode }})</div>
+            <div class="card-header bg-primary text-white d-flex justify-content-between">
+                <span>⚡ Quick Trade ({{ mode }})</span>
+                <span id="apiStatus" class="badge bg-light text-dark">Connecting...</span>
+            </div>
             <div class="card-body">
                 <form action="/trade" method="POST" autocomplete="off">
                     
-                    <div class="mb-2">
-                        <label>Symbol Search</label>
-                        <input type="text" id="symInput" class="form-control" placeholder="Type e.g. NIFTY 21500" required>
-                        <div id="suggestions" class="list-group position-absolute w-100" style="z-index:1000"></div>
+                    <div class="mb-2 position-relative">
+                        <label class="form-label text-muted small">1. Search Index/Stock</label>
+                        <div class="input-group">
+                            <input type="text" id="symInput" class="form-control" placeholder="e.g. NIFTY">
+                            <span class="input-group-text fw-bold" id="spotLtp">₹ 0.00</span>
+                        </div>
+                        <div id="suggestions" class="list-group position-absolute w-100 shadow" style="z-index:1000"></div>
                         
-                        <input type="hidden" name="symbol" id="realSymbol">
-                        <input type="hidden" name="security_id" id="realSecId">
-                    </div>
-
-                    <div class="mb-2">
-                        <label>SL Points</label>
-                        <input type="number" name="sl" class="form-control" value="20" required>
+                        <input type="hidden" id="underlyingSymbol">
                     </div>
 
                     <div class="row mb-2">
-                        <div class="col">
-                            <label>Qty</label>
-                            <input type="number" name="qty" class="form-control" value="25">
+                        <div class="col-4">
+                            <label class="form-label text-muted small">2. Side</label>
+                            <select name="direction" id="sideSelect" class="form-select">
+                                <option value="BUY">BUY (CE)</option>
+                                <option value="SELL">SELL (PE)</option>
+                            </select>
                         </div>
-                        <div class="col">
-                            <label>Side</label>
-                            <select name="direction" class="form-select">
-                                <option value="BUY">BUY</option>
-                                <option value="SELL">SELL</option>
+                        <div class="col-8">
+                            <label class="form-label text-muted small">3. Select Strike (ATM Selected)</label>
+                            <select id="strikeSelect" class="form-select">
+                                <option value="">Select Symbol First</option>
                             </select>
                         </div>
                     </div>
 
+                    <div class="alert alert-secondary p-2 mb-2 d-flex justify-content-between align-items-center">
+                        <small id="optName">No Option Selected</small>
+                        <strong id="optLtp" class="text-primary">₹ 0.00</strong>
+                    </div>
+
+                    <input type="hidden" name="final_security_id" id="finalSecId">
+                    <input type="hidden" name="final_symbol_name" id="finalSymName">
+
+                    <div class="row mb-3">
+                        <div class="col">
+                            <label class="form-label text-muted small">Quantity</label>
+                            <input type="number" name="qty" class="form-control" value="25">
+                        </div>
+                        <div class="col">
+                            <label class="form-label text-muted small">SL Points</label>
+                            <input type="number" name="sl" class="form-control" value="20">
+                        </div>
+                    </div>
+
                     <div class="mb-3">
-                        <label>Channel</label>
+                        <label class="form-label text-muted small">Notify Channel</label>
                         <select name="channel" class="form-select">
                             {% for c in channels %}
                             <option value="{{ c }}">{{ c }}</option>
@@ -44,22 +65,22 @@
                         </select>
                     </div>
 
-                    <button class="btn btn-success w-100">Execute Trade</button>
+                    <button class="btn btn-success w-100 fw-bold">🚀 EXECUTE TRADE</button>
                 </form>
             </div>
         </div>
     </div>
 
-    <div class="col-md-8">
+    <div class="col-md-7">
         <div class="card shadow-sm">
             <div class="card-header bg-dark text-white">📋 Active Positions</div>
             <div class="table-responsive">
-                <table class="table table-hover mb-0">
-                    <thead>
+                <table class="table table-hover mb-0 align-middle">
+                    <thead class="table-light">
                         <tr>
                             <th>Symbol</th>
                             <th>Entry</th>
-                            <th>High</th>
+                            <th>Current</th>
                             <th>Mode</th>
                             <th>Action</th>
                         </tr>
@@ -67,7 +88,12 @@
                     <tbody>
                         {% for id, t in trades.items() %}
                         <tr>
-                            <td>{{ t.symbol }}<br><small class="text-muted">{{ t.direction }}</small></td>
+                            <td>
+                                <strong>{{ t.symbol }}</strong><br>
+                                <span class="badge bg-{{ 'success' if t.direction=='BUY' else 'danger' }}">
+                                    {{ t.direction }}
+                                </span>
+                            </td>
                             <td>{{ t.entry_price }}</td>
                             <td>{{ t.max_price }}</td>
                             <td>
@@ -77,12 +103,12 @@
                             </td>
                             <td>
                                 {% if t.mode == 'PAPER' %}
-                                <a href="/convert/{{ id }}" class="btn btn-sm btn-outline-danger">🚀 Go Live</a>
+                                <a href="/convert/{{ id }}" class="btn btn-sm btn-outline-danger">Go Live</a>
                                 {% endif %}
                             </td>
                         </tr>
                         {% else %}
-                        <tr><td colspan="5" class="text-center">No Active Trades</td></tr>
+                        <tr><td colspan="5" class="text-center text-muted py-4">No Active Trades</td></tr>
                         {% endfor %}
                     </tbody>
                 </table>
@@ -92,12 +118,23 @@
 </div>
 
 <script>
-    // Simple Auto-Complete Logic
     const inp = document.getElementById('symInput');
     const sugg = document.getElementById('suggestions');
-    const realSym = document.getElementById('realSymbol');
-    const realId = document.getElementById('realSecId');
+    const spotLabel = document.getElementById('spotLtp');
+    const underlyingSym = document.getElementById('underlyingSymbol');
+    
+    const sideSel = document.getElementById('sideSelect');
+    const strikeSel = document.getElementById('strikeSelect');
+    
+    const optName = document.getElementById('optName');
+    const optLtp = document.getElementById('optLtp');
+    
+    const finalSecId = document.getElementById('finalSecId');
+    const finalSymName = document.getElementById('finalSymName');
 
+    let currentSpotPrice = 0;
+
+    // 1. Symbol Search & Spot LTP Fetch
     inp.addEventListener('input', async (e) => {
         const val = e.target.value;
         if(val.length < 2) { sugg.innerHTML = ''; return; }
@@ -107,17 +144,84 @@
         
         sugg.innerHTML = '';
         data.forEach(item => {
-            const a = document.createElement('a');
-            a.className = 'list-group-item list-group-item-action';
+            const a = document.createElement('button');
+            a.className = 'list-group-item list-group-item-action text-start';
             a.innerText = item.display;
-            a.onclick = () => {
+            a.type = "button";
+            a.onclick = async () => {
+                // Set UI
                 inp.value = item.symbol;
-                realSym.value = item.symbol;
-                realId.value = item.id;
+                underlyingSym.value = item.symbol;
                 sugg.innerHTML = '';
+                
+                // Fetch Spot LTP
+                spotLabel.innerText = "Fetching...";
+                const priceRes = await fetch(`/api/ltp?id=${item.id}`);
+                const priceData = await priceRes.json();
+                currentSpotPrice = priceData.ltp;
+                spotLabel.innerText = `₹ ${currentSpotPrice}`;
+                
+                // Trigger Option Chain Load
+                loadOptionChain();
             };
             sugg.appendChild(a);
         });
     });
+
+    // 2. Load Option Chain (Dropdown)
+    async function loadOptionChain() {
+        const sym = underlyingSym.value;
+        const dir = sideSel.value;
+        
+        if (!sym || currentSpotPrice === 0) return;
+        
+        strikeSel.innerHTML = '<option>Loading Chain...</option>';
+        
+        const res = await fetch(`/api/options?symbol=${sym}&spot=${currentSpotPrice}&direction=${dir}`);
+        const strikes = await res.json();
+        
+        strikeSel.innerHTML = '';
+        
+        strikes.forEach(s => {
+            const opt = document.createElement('option');
+            opt.value = s.id; // Security ID of the Option
+            opt.text = `${s.strike} ${s.is_atm ? '(ATM)' : ''}`;
+            opt.dataset.name = s.name;
+            
+            if (s.is_atm) opt.selected = true;
+            
+            strikeSel.appendChild(opt);
+        });
+        
+        // Trigger Option LTP Fetch for the selected one
+        updateOptionDetails();
+    }
+
+    // 3. Update Option LTP when Selection Changes
+    async function updateOptionDetails() {
+        const selectedOpt = strikeSel.options[strikeSel.selectedIndex];
+        if (!selectedOpt) return;
+        
+        const secId = selectedOpt.value;
+        const name = selectedOpt.dataset.name;
+        
+        optName.innerText = name;
+        optLtp.innerText = "₹ ...";
+        
+        // Update Hidden Fields
+        finalSecId.value = secId;
+        finalSymName.value = name;
+        
+        if (secId) {
+            const res = await fetch(`/api/option-ltp?id=${secId}`);
+            const data = await res.json();
+            optLtp.innerText = `₹ ${data.ltp}`;
+        }
+    }
+
+    // Event Listeners
+    sideSel.addEventListener('change', loadOptionChain); // Reload chain if Side changes (CE vs PE)
+    strikeSel.addEventListener('change', updateOptionDetails); // Fetch new LTP if Strike changes
+
 </script>
 {% endblock %}
