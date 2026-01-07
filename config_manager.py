@@ -3,7 +3,7 @@ import os
 from datetime import datetime
 
 class ConfigManager:
-    def __init__(self, filename="config.json"):
+    def __init__(self, filename="data/config.json"):
         self.filename = filename
         self.config = self.load_config()
 
