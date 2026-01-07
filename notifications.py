@@ -1,6 +1,5 @@
 import requests
 import json
-from datetime import datetime
 
 class TelegramBot:
     def __init__(self, config_manager):
@@ -28,27 +27,22 @@ class TelegramBot:
             print(f"Telegram Fail: {e}")
 
     def notify_add(self, channel, symbol, direction, mode):
-        """Trade Added Notification"""
-        msg = f"🛠 *Trade Added ({mode})*\nSymbol: {symbol}\nSide: {direction}\nWaiting for Entry..."
-        self.send_msg(channel, msg)
+        self.send_msg(channel, f"🛠 *Trade Added ({mode})*\nSymbol: {symbol}\nSide: {direction}\nWaiting for Fill...")
 
-    def notify_active(self, channel, trade_data):
-        """Detailed Active Trade Alert with 5 Targets"""
-        t = trade_data
-        targets = "\n".join([f"🎯 {k}: {v:.2f}" for k, v in t['targets'].items()])
+    def notify_active(self, channel, t):
+        # Format 5 Targets
+        targets_str = "\n".join([f"🎯 {k}: {v:.2f}" for k, v in t['targets'].items()])
         msg = (
             f"🚀 *TRADE ACTIVE*\n"
             f"Symbol: {t['symbol']} @ {t['entry_price']}\n"
             f"🛡 SL: {t['sl_price']:.2f}\n"
             f"------------------\n"
-            f"{targets}\n"
+            f"{targets_str}\n"
             f"------------------"
         )
         self.send_msg(channel, msg)
 
-    def notify_exit(self, channel, trade_data, reason, exit_price):
-        """Exit Alert with Made High & PnL"""
-        t = trade_data
+    def notify_exit(self, channel, t, reason, exit_price):
         pnl = (exit_price - t['entry_price']) * t['qty']
         if t['direction'] == "SELL": pnl *= -1
         
@@ -58,7 +52,7 @@ class TelegramBot:
             f"Symbol: {t['symbol']}\n"
             f"Reason: {reason}\n"
             f"Exit: {exit_price} | P&L: {pnl:.2f}\n"
-            f"📈 *Made High:* {t['max_price']} (Highest since entry)"
+            f"📈 *Made High:* {t['max_price']}"
         )
         self.send_msg(channel, msg)
 
