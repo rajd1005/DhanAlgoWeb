@@ -1,4 +1,4 @@
 flask
-dhanhq>=2.1.0
+dhanhq==2.2.0rc1
 requests
 pandas
