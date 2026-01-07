@@ -4,7 +4,7 @@ import time
 from datetime import datetime
 
 class TradingEngine:
-    def __init__(self, config_manager, notifier):
+    def __init__(self, ..., filename="data/active_trades.json"):
         self.cfg = config_manager
         self.notify = notifier
         self.dhan = None
